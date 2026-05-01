@@ -1,12 +1,6 @@
 package top.colter.dynamic.bilibili
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import top.colter.dynamic.core.data.Dynamic
 import top.colter.dynamic.core.data.DynamicContent
 import top.colter.dynamic.core.data.DynamicContentNodeText
@@ -18,37 +12,44 @@ import top.colter.dynamic.core.data.SubscriberType
 import top.colter.dynamic.core.event.DynamicEvent
 import top.colter.dynamic.core.event.broadcast
 import top.colter.dynamic.core.plugin.PublisherPlugin
+import top.colter.dynamic.core.task.IntervalTask
+import top.colter.dynamic.core.task.TaskEngine
+import top.colter.dynamic.core.task.TaskRegistry
+import top.colter.dynamic.core.tools.logger
 
 public class BilibiliPublisherPlugin : PublisherPlugin {
-    private val scope = CoroutineScope(Job() + Dispatchers.Default)
-    private var running: Boolean = false
+    private val detectTaskId: String = "bilibili-detect"
+    private val detectTask: IntervalTask = IntervalTask(
+        id = detectTaskId,
+        intervalMillis = 30_000,
+        runImmediately = true
+    ) {
+        publishDemoDynamic()
+    }
 
     override fun init() {
-        println("BilibiliPublisherPlugin init")
+        logger.info { "BilibiliPublisherPlugin init" }
     }
 
     override fun start() {
-        if (running) return
-        running = true
-
-        scope.launch {
-            while (isActive && running) {
-                publishDemoDynamic()
-                delay(30_000)
-            }
+        if (TaskRegistry.get(detectTaskId) == null) {
+            TaskRegistry.register(detectTask)
         }
 
-        println("BilibiliPublisherPlugin started")
+        val started = TaskEngine.startById(detectTaskId)
+        val snapshot = TaskEngine.snapshot(detectTaskId)
+        logger.info { "BilibiliPublisherPlugin started=$started, taskSnapshot=$snapshot" }
     }
 
     override fun stop() {
-        running = false
-        scope.cancel("BilibiliPublisherPlugin stop")
-        println("BilibiliPublisherPlugin stopped")
+        runBlocking {
+            TaskEngine.unregisterAndCancel(detectTaskId)
+        }
+        logger.info { "BilibiliPublisherPlugin stopped" }
     }
 
     override fun cleanup() {
-        println("BilibiliPublisherPlugin cleanup")
+        logger.info { "BilibiliPublisherPlugin cleanup" }
     }
 
     private fun publishDemoDynamic() {
