@@ -1,97 +1,129 @@
 package top.colter.dynamic.bilibili
 
 import kotlinx.coroutines.runBlocking
-import top.colter.dynamic.core.data.Dynamic
-import top.colter.dynamic.core.data.DynamicContent
-import top.colter.dynamic.core.data.DynamicContentNodeText
+import top.colter.dynamic.core.config.DefaultConfigService
+import top.colter.dynamic.core.config.loadOrCreate
 import top.colter.dynamic.core.data.Publisher
-import top.colter.dynamic.core.data.PublisherPlatform
-import top.colter.dynamic.core.data.PublisherType
-import top.colter.dynamic.core.data.Subscriber
-import top.colter.dynamic.core.data.SubscriberType
 import top.colter.dynamic.core.event.DynamicEvent
 import top.colter.dynamic.core.event.broadcast
 import top.colter.dynamic.core.plugin.PublisherPlugin
+import top.colter.dynamic.core.repository.SubscribeRepository
 import top.colter.dynamic.core.task.IntervalTask
 import top.colter.dynamic.core.task.TaskEngine
 import top.colter.dynamic.core.task.TaskRegistry
 import top.colter.dynamic.core.tools.logger
 
 public class BilibiliPublisherPlugin : PublisherPlugin {
+    private val pluginId: String = "bilibili-publisher"
     private val detectTaskId: String = "bilibili-detect"
-    private val detectTask: IntervalTask = IntervalTask(
-        id = detectTaskId,
-        intervalMillis = 30_000,
-        runImmediately = true
-    ) {
-        publishDemoDynamic()
-    }
+
+    private lateinit var config: BilibiliPublisherConfig
+    private lateinit var pollService: BilibiliPollService
+    private lateinit var mapper: BilibiliDynamicMapper
+    private lateinit var cursorStore: CursorStore
+    private lateinit var detectTask: IntervalTask
+
+    @Volatile
+    private var subscriptions: Map<Publisher, List<top.colter.dynamic.core.data.Subscriber>> = emptyMap()
+
+    @Volatile
+    private var lastSubscriptionRefreshAt: Long = 0
 
     override fun init() {
-        logger.info { "BilibiliPublisherPlugin init" }
+        config = DefaultConfigService.loadOrCreate(pluginId) { BilibiliPublisherConfig() }
+        pollService = BilibiliPollService(config.requestIntervalMs)
+        mapper = BilibiliDynamicMapper()
+        cursorStore = CursorStore(config.cursorPath)
+        detectTask = IntervalTask(
+            id = detectTaskId,
+            intervalMillis = config.pollingIntervalMs,
+            runImmediately = true,
+        ) {
+            detectAndPublish()
+        }
+
+        refreshSubscriptions(force = true)
+        logger.info {
+            "pluginId=$pluginId action=init configPath=${DefaultConfigService.resolvePath(pluginId).toAbsolutePath()}"
+        }
     }
 
     override fun start() {
         if (TaskRegistry.get(detectTaskId) == null) {
             TaskRegistry.register(detectTask)
         }
-
         val started = TaskEngine.startById(detectTaskId)
-        val snapshot = TaskEngine.snapshot(detectTaskId)
-        logger.info { "BilibiliPublisherPlugin started=$started, taskSnapshot=$snapshot" }
+        logger.info { "pluginId=bilibili-publisher action=start started=$started" }
     }
 
     override fun stop() {
         runBlocking {
             TaskEngine.unregisterAndCancel(detectTaskId)
         }
-        logger.info { "BilibiliPublisherPlugin stopped" }
+        logger.info { "pluginId=bilibili-publisher action=stop" }
     }
 
     override fun cleanup() {
-        logger.info { "BilibiliPublisherPlugin cleanup" }
+        logger.info { "pluginId=bilibili-publisher action=cleanup" }
     }
 
-    private fun publishDemoDynamic() {
-        val subscriber = Subscriber(
-            id = 1,
-            platform = "mock",
-            type = SubscriberType.GROUP,
-            userId = "demo-group",
-            name = "demo-group",
-            state = 1,
-            createTime = System.currentTimeMillis(),
-            createUser = 0,
-        )
+    private suspend fun detectAndPublish() {
+        refreshSubscriptions(force = false)
+        val start = System.currentTimeMillis()
+        val followedDynamics = runCatching { pollService.fetchSubscribedLatest(config.fetchLimit) }
+            .onFailure {
+                logger.error(it) {
+                    "pluginId=bilibili-publisher action=poll result=failed"
+                }
+            }
+            .getOrElse { emptyList() }
+        val latency = System.currentTimeMillis() - start
 
-        val dynamic = Dynamic(
-            platform = PublisherPlatform(
-                id = "bilibili",
-                name = "BiliBili",
-                link = "https://www.bilibili.com",
-                icon = "",
-            ),
-            dynamicId = "demo-${System.currentTimeMillis()}",
-            publisher = Publisher(
-                id = 1,
-                platform = "bilibili",
-                type = PublisherType.USER,
-                userId = "123456",
-                name = "Demo UP",
-            ),
-            time = System.currentTimeMillis(),
-            link = "https://t.bilibili.com",
-            content = DynamicContent(
-                text = "[demo] bilibili plugin dynamic",
-                contentNodes = listOf(DynamicContentNodeText("[demo] bilibili plugin dynamic")),
-            ),
-        )
+        subscriptions.forEach { (publisher, subscribers) ->
+            val publisherId = publisher.id.toString()
+            if (subscribers.isEmpty()) return@forEach
+            val uid = publisher.userId?.toLongOrNull() ?: return@forEach
 
-        DynamicEvent(
-            source = "bilibili-plugin",
-            target = subscriber,
-            label = "demo",
-            dynamic = dynamic,
-        ).broadcast()
+            val publisherDynamics = followedDynamics
+                .filter { it.mid == uid }
+                .sortedByDescending { it.time }
+            val latest = publisherDynamics.firstOrNull()
+            val cursor = cursorStore.get(publisherId)
+            if (cursor == null) {
+                if (latest != null) {
+                    cursorStore.markSeen(publisherId, latest.id.toString(), latest.time)
+                }
+                logger.info {
+                    "pluginId=bilibili-publisher publisherId=$publisherId action=bootstrap result=initialized latencyMs=$latency"
+                }
+                return@forEach
+            }
+
+            publisherDynamics
+                .asReversed()
+                .filterNot { cursorStore.hasSeen(publisherId, it.id.toString()) }
+                .forEach { raw ->
+                    val dynamic = mapper.map(raw, publisher) ?: return@forEach
+                    subscribers.forEach { subscriber ->
+                        DynamicEvent(source = "bilibili-plugin", target = subscriber, dynamic = dynamic).broadcast()
+                    }
+                    cursorStore.markSeen(publisherId, raw.id.toString(), raw.time)
+                }
+        }
+    }
+
+    private fun refreshSubscriptions(force: Boolean) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastSubscriptionRefreshAt < config.subscriptionRefreshIntervalMs) return
+
+        val activePublishers = SubscribeRepository.findActivePublishersByPlatform("bilibili")
+        subscriptions = activePublishers.associateWith { publisher ->
+            SubscribeRepository.findSubscribersByPublisherId(publisher.id.toString())
+                .filter { it.state == 1 }
+        }
+        lastSubscriptionRefreshAt = now
+        logger.info {
+            "pluginId=bilibili-publisher action=refresh_subscription publisherSize=${subscriptions.size}"
+        }
     }
 }
