@@ -6,4 +6,5 @@ public data class BilibiliPublisherConfig(
     val fetchLimit: Int = 5,
     val requestIntervalMs: Long = 500,
     val cursorPath: String = "config/bilibili-publisher-cursor.yml",
+    val cookiesJson: String = "",
 )

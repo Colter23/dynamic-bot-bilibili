@@ -3,22 +3,45 @@ package top.colter.dynamic.bilibili
 import kotlinx.coroutines.runBlocking
 import top.colter.dynamic.core.config.DefaultConfigService
 import top.colter.dynamic.core.config.loadOrCreate
+import top.colter.dynamic.core.config.save
+import top.colter.dynamic.core.data.LazyImage
 import top.colter.dynamic.core.data.Publisher
+import top.colter.dynamic.core.data.PublisherProfile
+import top.colter.dynamic.core.data.PublisherType
 import top.colter.dynamic.core.event.DynamicEvent
 import top.colter.dynamic.core.event.broadcast
-import top.colter.dynamic.core.plugin.PublisherPlugin
+import top.colter.dynamic.core.plugin.FollowActionResult
+import top.colter.dynamic.core.plugin.FollowState
+import top.colter.dynamic.core.plugin.PlatformPublisherPlugin
+import top.colter.dynamic.core.plugin.PublisherLoginMethod
+import top.colter.dynamic.core.plugin.PublisherLoginResult
+import top.colter.dynamic.core.plugin.PublisherLoginStatus
+import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import top.colter.dynamic.core.repository.SubscribeRepository
 import top.colter.dynamic.core.task.IntervalTask
 import top.colter.dynamic.core.task.TaskEngine
 import top.colter.dynamic.core.task.TaskRegistry
 import top.colter.dynamic.core.tools.logger
 
-public class BilibiliPublisherPlugin : PublisherPlugin {
+public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     private val pluginId: String = "bilibili-publisher"
     private val detectTaskId: String = "bilibili-detect"
 
+    override val platformId: String = "bilibili"
+
+    private var loadConfig: (String) -> BilibiliPublisherConfig = { pluginId ->
+        DefaultConfigService.loadOrCreate(pluginId) { BilibiliPublisherConfig() }
+    }
+    private var serviceFactory: (Long) -> BilibiliPlatformGateway = { requestIntervalMs ->
+        BilibiliPollService(requestIntervalMs)
+    }
+    private var cursorStoreFactory: (String) -> CursorStore = { path -> CursorStore(path) }
+    private var saveConfig: (String, BilibiliPublisherConfig) -> Unit = { id, config ->
+        DefaultConfigService.save(id, config)
+    }
+
     private lateinit var config: BilibiliPublisherConfig
-    private lateinit var pollService: BilibiliPollService
+    private lateinit var pollService: BilibiliPlatformGateway
     private lateinit var mapper: BilibiliDynamicMapper
     private lateinit var cursorStore: CursorStore
     private lateinit var detectTask: IntervalTask
@@ -29,11 +52,29 @@ public class BilibiliPublisherPlugin : PublisherPlugin {
     @Volatile
     private var lastSubscriptionRefreshAt: Long = 0
 
+    internal constructor(
+        loadConfig: (String) -> BilibiliPublisherConfig,
+        serviceFactory: (Long) -> BilibiliPlatformGateway,
+        cursorStoreFactory: (String) -> CursorStore,
+        saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
+    ) : this() {
+        this.loadConfig = loadConfig
+        this.serviceFactory = serviceFactory
+        this.cursorStoreFactory = cursorStoreFactory
+        this.saveConfig = saveConfig
+    }
+
+    override val supportedLoginMethods: Set<PublisherLoginMethod> = setOf(
+        PublisherLoginMethod.COOKIE,
+        PublisherLoginMethod.QR_CODE,
+    )
+
     override fun init() {
-        config = DefaultConfigService.loadOrCreate(pluginId) { BilibiliPublisherConfig() }
-        pollService = BilibiliPollService(config.requestIntervalMs)
+        config = loadConfig(pluginId)
+        pollService = serviceFactory(config.requestIntervalMs)
+        importStoredCookies()
         mapper = BilibiliDynamicMapper()
-        cursorStore = CursorStore(config.cursorPath)
+        cursorStore = cursorStoreFactory(config.cursorPath)
         detectTask = IntervalTask(
             id = detectTaskId,
             intervalMillis = config.pollingIntervalMs,
@@ -65,6 +106,45 @@ public class BilibiliPublisherPlugin : PublisherPlugin {
 
     override fun cleanup() {
         logger.info { "pluginId=bilibili-publisher action=cleanup" }
+    }
+
+    override suspend fun fetchPublisherProfile(userId: String): PublisherProfile? {
+        val snapshot = pollService.fetchPublisherProfile(userId) ?: return null
+        return PublisherProfile(
+            platform = platformId,
+            userId = snapshot.userId,
+            type = PublisherType.USER,
+            name = snapshot.name,
+            official = snapshot.official,
+            state = 1,
+            face = LazyImage(snapshot.faceUrl),
+            header = snapshot.headerUrl?.let(::LazyImage),
+            pendant = snapshot.pendantUrl?.let(::LazyImage),
+        )
+    }
+
+    override suspend fun queryFollowState(userId: String): FollowState {
+        return pollService.queryFollowState(userId)
+    }
+
+    override suspend fun followPublisher(userId: String): FollowActionResult {
+        return pollService.followPublisher(userId)
+    }
+
+    override suspend fun loginByCookie(cookie: String): PublisherLoginResult {
+        val result = pollService.loginByCookie(cookie)
+        persistCookiesIfLoggedIn(result)
+        return result
+    }
+
+    override suspend fun startQrLogin(): PublisherQrLoginChallenge? {
+        return pollService.startQrLogin()
+    }
+
+    override suspend fun pollQrLogin(sessionId: String): PublisherLoginResult {
+        val result = pollService.pollQrLogin(sessionId)
+        persistCookiesIfLoggedIn(result)
+        return result
     }
 
     private suspend fun detectAndPublish() {
@@ -116,7 +196,7 @@ public class BilibiliPublisherPlugin : PublisherPlugin {
         val now = System.currentTimeMillis()
         if (!force && now - lastSubscriptionRefreshAt < config.subscriptionRefreshIntervalMs) return
 
-        val activePublishers = SubscribeRepository.findActivePublishersByPlatform("bilibili")
+        val activePublishers = SubscribeRepository.findActivePublishersByPlatform(platformId)
         subscriptions = activePublishers.associateWith { publisher ->
             SubscribeRepository.findSubscribersByPublisherId(publisher.id.toString())
                 .filter { it.state == 1 }
@@ -125,5 +205,22 @@ public class BilibiliPublisherPlugin : PublisherPlugin {
         logger.info {
             "pluginId=bilibili-publisher action=refresh_subscription publisherSize=${subscriptions.size}"
         }
+    }
+
+    private fun importStoredCookies() {
+        if (config.cookiesJson.isBlank()) return
+        runCatching {
+            runBlocking {
+                pollService.importCookiesJson(config.cookiesJson)
+            }
+        }.onFailure {
+            logger.warn(it) { "pluginId=bilibili-publisher action=import_stored_cookies result=failed" }
+        }
+    }
+
+    private fun persistCookiesIfLoggedIn(result: PublisherLoginResult) {
+        if (result.status != PublisherLoginStatus.SUCCESS) return
+        config = config.copy(cookiesJson = pollService.exportCookiesJson())
+        saveConfig(pluginId, config)
     }
 }
