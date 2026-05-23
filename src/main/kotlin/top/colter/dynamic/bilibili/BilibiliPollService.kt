@@ -11,9 +11,14 @@ import top.colter.bilibili.api.getNewDynamic
 import top.colter.bilibili.api.getUserInfo
 import top.colter.bilibili.api.getUserNewDynamic
 import top.colter.bilibili.api.isFollow
+import top.colter.bilibili.auth.qrCode
+import top.colter.bilibili.client.BiliAuthClient
 import top.colter.bilibili.client.BiliClient
 import top.colter.bilibili.data.EditCookie
 import top.colter.bilibili.data.dynamic.BiliDynamic
+import top.colter.bilibili.data.login.QrCodeLoginData
+import top.colter.bilibili.data.login.QrCodeLoginResult
+import top.colter.bilibili.data.login.QrCodeLoginStatus
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
@@ -21,9 +26,7 @@ import top.colter.dynamic.core.plugin.PublisherLoginAccount
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
-import java.net.HttpCookie
 import java.net.URI
-import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
@@ -61,11 +64,10 @@ internal interface BilibiliPlatformGateway {
         )
     }
 
-    suspend fun startQrLogin(): PublisherQrLoginChallenge? {
-        return null
-    }
-
-    suspend fun pollQrLogin(sessionId: String): PublisherLoginResult {
+    suspend fun loginByQrCode(
+        onQrCode: suspend (PublisherQrLoginChallenge) -> Unit,
+        onStatusChanged: suspend (PublisherLoginResult) -> Unit = { _ -> },
+    ): PublisherLoginResult {
         return PublisherLoginResult(
             status = PublisherLoginStatus.UNSUPPORTED,
             message = "QR code login is unsupported",
@@ -73,14 +75,47 @@ internal interface BilibiliPlatformGateway {
     }
 }
 
+internal data class BilibiliQrLoginOutcome(
+    val result: QrCodeLoginResult,
+    val cookiesJson: String,
+)
+
+internal interface BilibiliQrLoginGateway {
+    suspend fun loginByQrCode(
+        onQrCode: suspend (QrCodeLoginData) -> Unit,
+        onStatusChanged: suspend (QrCodeLoginResult) -> Unit,
+    ): BilibiliQrLoginOutcome
+}
+
+internal class BilibiliClientQrLoginGateway(
+    private val client: BiliAuthClient = BiliAuthClient(),
+    private val pollIntervalMs: Long = 1000,
+    private val timeoutMs: Long = 180_000,
+) : BilibiliQrLoginGateway {
+    override suspend fun loginByQrCode(
+        onQrCode: suspend (QrCodeLoginData) -> Unit,
+        onStatusChanged: suspend (QrCodeLoginResult) -> Unit,
+    ): BilibiliQrLoginOutcome {
+        val result = client.qrCode(pollIntervalMs, timeoutMs, onQrCode, onStatusChanged)
+        return BilibiliQrLoginOutcome(
+            result = result,
+            cookiesJson = client.exportEditCookiesJson(),
+        )
+    }
+}
+
 internal class BilibiliPollService(
     private val requestIntervalMs: Long,
     private val client: BiliClient = BiliClient(),
+    private val qrLoginGatewayFactory: () -> BilibiliQrLoginGateway = { BilibiliClientQrLoginGateway() },
+    loginVerifier: (suspend (List<EditCookie>) -> PublisherLoginResult)? = null,
 ) : BilibiliPlatformGateway {
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .followRedirects(HttpClient.Redirect.NEVER)
         .build()
     private val objectMapper: ObjectMapper = ObjectMapper().registerKotlinModule()
+    private val loginVerifier: suspend (List<EditCookie>) -> PublisherLoginResult =
+        loginVerifier ?: { cookies -> verifyLogin(cookies) }
 
     override suspend fun fetchSubscribedLatest(limit: Int): List<BiliDynamic> {
         val list = client.getNewDynamic(0, "")
@@ -166,87 +201,18 @@ internal class BilibiliPollService(
         }
     }
 
-    override suspend fun startQrLogin(): PublisherQrLoginChallenge? {
-        val response = sendRequest(
-            HttpRequest.newBuilder(URI.create(QR_GENERATE_URL))
-                .header("User-Agent", USER_AGENT)
-                .GET()
-                .build()
-        )
-        val root = objectMapper.readTree(response.body())
-        val apiCode = root.path("code").asInt(Int.MIN_VALUE)
-        if (apiCode != 0) {
-            val message = root.path("message").asText("unknown error")
-            throw IllegalStateException("Bilibili QR generate failed: code=$apiCode, message=$message")
-        }
-
-        val data = root.path("data")
-        val qrContent = data.path("url").asText("")
-        val sessionId = data.path("qrcode_key").asText("")
-        require(qrContent.isNotBlank() && sessionId.isNotBlank()) {
-            "Bilibili QR generate response is missing url or qrcode_key"
-        }
-
-        return PublisherQrLoginChallenge(
-            sessionId = sessionId,
-            qrContent = qrContent,
-            expiresAtEpochSeconds = System.currentTimeMillis() / 1000 + QR_EXPIRES_SECONDS,
-            message = "waiting for Bilibili app scan confirmation",
-        )
-    }
-
-    override suspend fun pollQrLogin(sessionId: String): PublisherLoginResult {
-        if (sessionId.isBlank()) {
-            return PublisherLoginResult(PublisherLoginStatus.FAILED, "sessionId is blank")
-        }
-
-        val encodedKey = URLEncoder.encode(sessionId, StandardCharsets.UTF_8)
-        val response = sendRequest(
-            HttpRequest.newBuilder(URI.create("$QR_POLL_URL?qrcode_key=$encodedKey"))
-                .header("User-Agent", USER_AGENT)
-                .GET()
-                .build()
-        )
-        val root = objectMapper.readTree(response.body())
-        val apiCode = root.path("code").asInt(Int.MIN_VALUE)
-        if (apiCode != 0) {
-            val message = root.path("message").asText("unknown error")
-            return PublisherLoginResult(
-                status = PublisherLoginStatus.FAILED,
-                message = "Bilibili QR poll failed: code=$apiCode, message=$message",
+    override suspend fun loginByQrCode(
+        onQrCode: suspend (PublisherQrLoginChallenge) -> Unit,
+        onStatusChanged: suspend (PublisherLoginResult) -> Unit,
+    ): PublisherLoginResult {
+        return runCatching {
+            val outcome = qrLoginGatewayFactory().loginByQrCode(
+                onQrCode = { qrCodeData -> onQrCode(qrCodeData.toChallenge()) },
+                onStatusChanged = { qrCodeResult -> onStatusChanged(qrCodeResult.toPublisherLoginResult()) },
             )
-        }
-
-        val data = root.path("data")
-        val loginCode = data.path("code").asInt(Int.MIN_VALUE)
-        val message = data.path("message").asText("")
-        return when (loginCode) {
-            0 -> {
-                val cookies = parseSetCookieHeaders(response.headers().allValues("set-cookie"))
-                if (cookies.isEmpty()) {
-                    PublisherLoginResult(PublisherLoginStatus.FAILED, "Bilibili QR login returned no cookies")
-                } else {
-                    importAndVerifyCookies {
-                        client.importEditCookies(cookies, true)
-                    }
-                }
-            }
-            86038 -> PublisherLoginResult(
-                status = PublisherLoginStatus.EXPIRED,
-                message = message.ifBlank { "QR code expired" },
-            )
-            86090 -> PublisherLoginResult(
-                status = PublisherLoginStatus.PENDING,
-                message = message.ifBlank { "QR code scanned, waiting for confirmation" },
-            )
-            86101 -> PublisherLoginResult(
-                status = PublisherLoginStatus.PENDING,
-                message = message.ifBlank { "waiting for QR code scan" },
-            )
-            else -> PublisherLoginResult(
-                status = PublisherLoginStatus.FAILED,
-                message = message.ifBlank { "Bilibili QR login failed: code=$loginCode" },
-            )
+            importQrLoginCookies(outcome)
+        }.getOrElse { throwable ->
+            throwable.toQrFailureResult()
         }
     }
 
@@ -260,7 +226,7 @@ internal class BilibiliPollService(
         val previousCookiesJson = client.exportEditCookiesJson()
         return runCatching {
             importer()
-            val result = verifyLogin(client.exportEditCookies())
+            val result = loginVerifier(client.exportEditCookies())
             if (result.status != PublisherLoginStatus.SUCCESS) {
                 restoreCookies(previousCookiesJson)
             }
@@ -328,6 +294,60 @@ internal class BilibiliPollService(
         }
     }
 
+    private suspend fun importQrLoginCookies(outcome: BilibiliQrLoginOutcome): PublisherLoginResult {
+        return if (outcome.result.status == QrCodeLoginStatus.SUCCESS) {
+            importAndVerifyCookies {
+                client.importEditCookiesJson(outcome.cookiesJson, true)
+            }
+        } else {
+            outcome.result.toPublisherLoginResult()
+        }
+    }
+
+    private fun QrCodeLoginData.toChallenge(): PublisherQrLoginChallenge {
+        return PublisherQrLoginChallenge(
+            qrContent = url,
+            expiresAtEpochSeconds = System.currentTimeMillis() / 1000 + QR_EXPIRES_SECONDS,
+            message = "waiting for Bilibili app scan confirmation",
+        )
+    }
+
+    private fun QrCodeLoginResult.toPublisherLoginResult(): PublisherLoginResult {
+        val resolvedMessage = message.ifBlank { status.text }
+        return when (status) {
+            QrCodeLoginStatus.SUCCESS -> PublisherLoginResult(
+                status = PublisherLoginStatus.SUCCESS,
+                message = resolvedMessage.ifBlank { "login success" },
+            )
+            QrCodeLoginStatus.EXPIRED -> PublisherLoginResult(
+                status = PublisherLoginStatus.EXPIRED,
+                message = resolvedMessage.ifBlank { "QR code expired" },
+            )
+            QrCodeLoginStatus.SCANNED -> PublisherLoginResult(
+                status = PublisherLoginStatus.PENDING,
+                message = resolvedMessage.ifBlank { "QR code scanned, waiting for confirmation" },
+            )
+            QrCodeLoginStatus.WAITING -> PublisherLoginResult(
+                status = PublisherLoginStatus.PENDING,
+                message = resolvedMessage.ifBlank { "waiting for QR code scan" },
+            )
+            QrCodeLoginStatus.UNKNOWN -> PublisherLoginResult(
+                status = PublisherLoginStatus.FAILED,
+                message = resolvedMessage.ifBlank { "Bilibili QR login failed: code=$code" },
+            )
+        }
+    }
+
+    private fun Throwable.toQrFailureResult(): PublisherLoginResult {
+        val reason = message ?: "QR code login failed"
+        val status = if (reason.contains("失效") || reason.contains("超时") || reason.contains("expired", ignoreCase = true)) {
+            PublisherLoginStatus.EXPIRED
+        } else {
+            PublisherLoginStatus.FAILED
+        }
+        return PublisherLoginResult(status, reason)
+    }
+
     private fun parseCookieHeader(cookieHeader: String): List<EditCookie> {
         return cookieHeader.split(";")
             .mapNotNull { rawPair ->
@@ -352,33 +372,6 @@ internal class BilibiliPollService(
             .toList()
     }
 
-    private fun parseSetCookieHeaders(headers: List<String>): List<EditCookie> {
-        return headers.flatMap { header ->
-            runCatching { HttpCookie.parse(header) }
-                .getOrDefault(emptyList())
-                .mapNotNull { cookie ->
-                    val name = cookie.name.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    EditCookie(
-                        domain = cookie.domain?.takeIf { it.isNotBlank() } ?: DEFAULT_COOKIE_DOMAIN,
-                        expirationDate = cookie.expirationDate(),
-                        httpOnly = cookie.isHttpOnly,
-                        name = name,
-                        path = cookie.path?.takeIf { it.isNotBlank() } ?: DEFAULT_COOKIE_PATH,
-                        secure = cookie.secure,
-                        value = cookie.value,
-                    )
-                }
-        }
-    }
-
-    private fun HttpCookie.expirationDate(): Double? {
-        return if (maxAge >= 0) {
-            System.currentTimeMillis() / 1000.0 + maxAge
-        } else {
-            null
-        }
-    }
-
     private fun List<EditCookie>.toCookieHeader(): String {
         return joinToString("; ") { cookie -> "${cookie.name}=${cookie.value}" }
     }
@@ -395,10 +388,6 @@ internal class BilibiliPollService(
         private const val DEFAULT_COOKIE_DOMAIN: String = ".bilibili.com"
         private const val DEFAULT_COOKIE_PATH: String = "/"
         private const val QR_EXPIRES_SECONDS: Long = 180
-        private const val QR_GENERATE_URL: String =
-            "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
-        private const val QR_POLL_URL: String =
-            "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
         private const val NAV_URL: String = "https://api.bilibili.com/x/web-interface/nav"
     }
 }

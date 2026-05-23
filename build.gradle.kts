@@ -28,6 +28,21 @@ tasks.test {
     useJUnitPlatform()
 }
 
+tasks.register<Jar>("fatJar") {
+    group = "build"
+    description = "Builds an executable fat jar with runtime dependencies."
+    archiveClassifier.set("all")
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from(sourceSets.main.get().output)
+    dependsOn(configurations.runtimeClasspath)
+    from({
+        configurations.runtimeClasspath.get().filter { it.exists() }.map { file ->
+            if (file.isDirectory) file else zipTree(file)
+        }
+    })
+}
+
 kotlin {
     jvmToolchain(21)
 }

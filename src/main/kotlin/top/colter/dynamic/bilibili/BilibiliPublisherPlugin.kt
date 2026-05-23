@@ -137,12 +137,11 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
         return result
     }
 
-    override suspend fun startQrLogin(): PublisherQrLoginChallenge? {
-        return pollService.startQrLogin()
-    }
-
-    override suspend fun pollQrLogin(sessionId: String): PublisherLoginResult {
-        val result = pollService.pollQrLogin(sessionId)
+    override suspend fun loginByQrCode(
+        onQrCode: suspend (PublisherQrLoginChallenge) -> Unit,
+        onStatusChanged: suspend (PublisherLoginResult) -> Unit,
+    ): PublisherLoginResult {
+        val result = pollService.loginByQrCode(onQrCode, onStatusChanged)
         persistCookiesIfLoggedIn(result)
         return result
     }
