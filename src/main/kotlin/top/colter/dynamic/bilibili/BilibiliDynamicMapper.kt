@@ -3,7 +3,6 @@ package top.colter.dynamic.bilibili
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.dynamic.core.data.Dynamic
 import top.colter.dynamic.core.data.DynamicContent
-import top.colter.dynamic.core.data.DynamicContentNode
 import top.colter.dynamic.core.data.DynamicContentNodeText
 import top.colter.dynamic.core.data.DynamicMedia
 import top.colter.dynamic.core.data.DynamicMediaPic
@@ -17,12 +16,16 @@ import top.colter.dynamic.core.data.PublisherType
 
 internal class BilibiliDynamicMapper {
     fun map(source: BiliDynamic, fallbackPublisher: Publisher): Dynamic? {
-        val dynamicId = source.id.toString()
-        if (dynamicId.isBlank()) return null
+        if (source.id <= 0) return null
 
+        val dynamicId = source.id.toString()
         val desc = source.modules.dynamic.desc
         val contentText = desc?.text?.trim().orEmpty()
-        val nodes = if (contentText.isBlank()) emptyList() else listOf(DynamicContentNodeText(contentText))
+        val contentNodes = if (contentText.isBlank()) {
+            emptyList()
+        } else {
+            listOf(DynamicContentNodeText(contentText))
+        }
 
         val media = buildMedia(source)
         val stats = source.modules.stat?.let {
@@ -34,24 +37,22 @@ internal class BilibiliDynamicMapper {
         }
 
         return Dynamic(
-            platform = PublisherPlatform(
-                id = "bilibili",
-                name = "BiliBili",
-                link = "https://www.bilibili.com",
-                icon = "",
-            ),
+            platform = BILIBILI_PLATFORM,
             dynamicId = dynamicId,
             publisher = fallbackPublisher.copy(
                 type = PublisherType.USER,
-                userId = source.mid.toString().ifBlank { fallbackPublisher.userId },
-                name = source.name.ifBlank { fallbackPublisher.name },
-                face = source.modules.author.face?.let { LazyImage(it.url) } ?: fallbackPublisher.face,
+                userId = source.mid.takeIf { it > 0 }?.toString() ?: fallbackPublisher.userId,
+                name = source.name.takeIf { it.isNotBlank() } ?: fallbackPublisher.name,
+                face = source.modules.author.face?.url
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let(::LazyImage)
+                    ?: fallbackPublisher.face,
             ),
             time = source.time * 1000,
             link = "https://t.bilibili.com/$dynamicId",
             content = DynamicContent(
                 text = contentText,
-                contentNodes = nodes.ifEmpty { listOf<DynamicContentNode>(DynamicContentNodeText("")) },
+                contentNodes = contentNodes,
             ),
             media = media,
             stats = stats,
@@ -92,6 +93,15 @@ internal class BilibiliDynamicMapper {
         return DynamicMedia(
             pics = pics,
             video = video,
+        )
+    }
+
+    private companion object {
+        private val BILIBILI_PLATFORM: PublisherPlatform = PublisherPlatform(
+            id = "bilibili",
+            name = "Bilibili",
+            link = "https://www.bilibili.com",
+            icon = "https://www.bilibili.com/favicon.ico",
         )
     }
 }

@@ -1,13 +1,16 @@
 package top.colter.dynamic.bilibili
 
 import kotlinx.coroutines.runBlocking
+import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.dynamic.core.config.DefaultConfigService
 import top.colter.dynamic.core.config.loadOrCreate
 import top.colter.dynamic.core.config.save
 import top.colter.dynamic.core.data.LazyImage
 import top.colter.dynamic.core.data.Publisher
+import top.colter.dynamic.core.data.PublisherCursor
 import top.colter.dynamic.core.data.PublisherProfile
 import top.colter.dynamic.core.data.PublisherType
+import top.colter.dynamic.core.data.Subscriber
 import top.colter.dynamic.core.event.DynamicEvent
 import top.colter.dynamic.core.event.broadcast
 import top.colter.dynamic.core.plugin.FollowActionResult
@@ -36,7 +39,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     private var serviceFactory: (Long) -> BilibiliPlatformGateway = { requestIntervalMs ->
         BilibiliPollService(requestIntervalMs)
     }
-    private var cursorStoreFactory: (String) -> CursorStore = { path -> CursorStore(path) }
+    private var cursorStoreFactory: () -> BilibiliCursorStore = { DatabaseBilibiliCursorStore() }
     private var saveConfig: (String, BilibiliPublisherConfig) -> Unit = { id, config ->
         DefaultConfigService.save(id, config)
     }
@@ -45,11 +48,11 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     private lateinit var config: BilibiliPublisherConfig
     private lateinit var pollService: BilibiliPlatformGateway
     private lateinit var mapper: BilibiliDynamicMapper
-    private lateinit var cursorStore: CursorStore
+    private lateinit var cursorStore: BilibiliCursorStore
     private lateinit var detectTask: TaskDefinition
 
     @Volatile
-    private var subscriptions: Map<Publisher, List<top.colter.dynamic.core.data.Subscriber>> = emptyMap()
+    private var subscriptions: Map<Publisher, List<Subscriber>> = emptyMap()
 
     @Volatile
     private var lastSubscriptionRefreshAt: Long = 0
@@ -57,7 +60,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     internal constructor(
         loadConfig: (String) -> BilibiliPublisherConfig,
         serviceFactory: (Long) -> BilibiliPlatformGateway,
-        cursorStoreFactory: (String) -> CursorStore,
+        cursorStoreFactory: () -> BilibiliCursorStore,
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
         taskScheduler: TaskScheduler = TaskScheduler(),
     ) : this() {
@@ -76,9 +79,8 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     override fun init() {
         config = loadConfig(pluginId)
         pollService = serviceFactory(config.requestIntervalMs)
-        importStoredCookies()
         mapper = BilibiliDynamicMapper()
-        cursorStore = cursorStoreFactory(config.cursorPath)
+        cursorStore = cursorStoreFactory()
         detectTask = TaskDefinition(
             id = detectTaskId,
             schedule = TaskSchedule.FixedDelay(config.pollingIntervalMs.milliseconds, runImmediately = true),
@@ -87,6 +89,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
             },
         )
 
+        importStoredCookies()
         refreshSubscriptions(force = true)
         logger.info {
             "pluginId=$pluginId action=init configPath=${DefaultConfigService.resolvePath(pluginId).toAbsolutePath()}"
@@ -94,19 +97,28 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     }
 
     override fun start() {
-        val started = taskScheduler.start(detectTask)
-        logger.info { "pluginId=bilibili-publisher action=start started=$started" }
+        val loginResult = runBlocking { pollService.checkLoginState() }
+        if (loginResult.status == PublisherLoginStatus.SUCCESS) {
+            val started = startDetectionTask()
+            logger.info {
+                "pluginId=$pluginId action=start result=started loginAccount=${loginResult.account?.name ?: loginResult.account?.userId ?: "unknown"} taskStarted=$started"
+            }
+        } else {
+            logger.warn {
+                "pluginId=$pluginId action=start result=skipped reason=${loginResult.status.name.lowercase()} message=${loginResult.message}"
+            }
+        }
     }
 
     override fun stop() {
         runBlocking {
             taskScheduler.stop(detectTaskId)
         }
-        logger.info { "pluginId=bilibili-publisher action=stop" }
+        logger.info { "pluginId=$pluginId action=stop" }
     }
 
     override fun cleanup() {
-        logger.info { "pluginId=bilibili-publisher action=cleanup" }
+        logger.info { "pluginId=$pluginId action=cleanup" }
     }
 
     override suspend fun fetchPublisherProfile(userId: String): PublisherProfile? {
@@ -135,6 +147,9 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     override suspend fun loginByCookie(cookie: String): PublisherLoginResult {
         val result = pollService.loginByCookie(cookie)
         persistCookiesIfLoggedIn(result)
+        if (result.status == PublisherLoginStatus.SUCCESS) {
+            startDetectionTask()
+        }
         return result
     }
 
@@ -144,50 +159,61 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     ): PublisherLoginResult {
         val result = pollService.loginByQrCode(onQrCode, onStatusChanged)
         persistCookiesIfLoggedIn(result)
+        if (result.status == PublisherLoginStatus.SUCCESS) {
+            startDetectionTask()
+        }
         return result
     }
 
     private suspend fun detectAndPublish() {
         refreshSubscriptions(force = false)
+        if (subscriptions.isEmpty()) return
+
         val start = System.currentTimeMillis()
         val followedDynamics = runCatching { pollService.fetchSubscribedLatest(config.fetchLimit) }
             .onFailure {
                 logger.error(it) {
-                    "pluginId=bilibili-publisher action=poll result=failed"
+                    "pluginId=$pluginId action=poll result=failed"
                 }
             }
             .getOrElse { emptyList() }
         val latency = System.currentTimeMillis() - start
-
-        subscriptions.forEach { (publisher, subscribers) ->
-            val publisherId = publisher.id.toString()
-            if (subscribers.isEmpty()) return@forEach
-            val uid = publisher.userId?.toLongOrNull() ?: return@forEach
-
-            val publisherDynamics = followedDynamics
-                .filter { it.mid == uid }
-                .sortedByDescending { it.time }
-            val latest = publisherDynamics.firstOrNull()
-            val cursor = cursorStore.get(publisherId)
-            if (cursor == null) {
-                if (latest != null) {
-                    cursorStore.markSeen(publisherId, latest.id.toString(), latest.time)
-                }
-                logger.info {
-                    "pluginId=bilibili-publisher publisherId=$publisherId action=bootstrap result=initialized latencyMs=$latency"
-                }
-                return@forEach
+        val dynamicsByPublisher = followedDynamics
+            .groupBy { it.mid }
+            .mapValues { (_, dynamics) ->
+                dynamics.sortedWith(compareByDescending<BiliDynamic> { it.time }.thenByDescending { it.id })
             }
 
+        subscriptions.forEach publisherLoop@{ (publisher, subscribers) ->
+            val publisherId = publisher.id.toString()
+            val uid = publisher.userId?.toLongOrNull() ?: return@publisherLoop
+            val publisherDynamics = dynamicsByPublisher[uid].orEmpty()
+            if (publisherDynamics.isEmpty()) return@publisherLoop
+
+            val initialCursor = cursorStore.get(publisherId)
+            if (initialCursor == null) {
+                val latestDynamic = publisherDynamics.first()
+                cursorStore.markSeen(publisherId, latestDynamic.id.toString(), latestDynamic.time)
+                logger.info {
+                    "pluginId=$pluginId publisherId=$publisherId action=bootstrap result=initialized latencyMs=$latency"
+                }
+                return@publisherLoop
+            }
+
+            var cursor: PublisherCursor = initialCursor
             publisherDynamics
                 .asReversed()
-                .filterNot { cursorStore.hasSeen(publisherId, it.id.toString()) }
-                .forEach { raw ->
-                    val dynamic = mapper.map(raw, publisher) ?: return@forEach
-                    subscribers.forEach { subscriber ->
-                        DynamicEvent(source = "bilibili-plugin", target = subscriber, dynamic = dynamic).broadcast()
+                .forEach dynamicLoop@{ raw ->
+                    val dynamicId = raw.id.toString()
+                    if (cursor.lastSeenDynamicId == dynamicId || cursor.recentDynamicIds.contains(dynamicId)) {
+                        return@dynamicLoop
                     }
-                    cursorStore.markSeen(publisherId, raw.id.toString(), raw.time)
+
+                    val dynamic = mapper.map(raw, publisher) ?: return@dynamicLoop
+                    subscribers.forEach { subscriber ->
+                        DynamicEvent(source = pluginId, target = subscriber, dynamic = dynamic).broadcast()
+                    }
+                    cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
                 }
         }
     }
@@ -196,14 +222,10 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
         val now = System.currentTimeMillis()
         if (!force && now - lastSubscriptionRefreshAt < config.subscriptionRefreshIntervalMs) return
 
-        val activePublishers = SubscribeRepository.findActivePublishersByPlatform(platformId)
-        subscriptions = activePublishers.associateWith { publisher ->
-            SubscribeRepository.findSubscribersByPublisherId(publisher.id.toString())
-                .filter { it.state == 1 }
-        }
+        subscriptions = SubscribeRepository.findActivePublishersWithSubscribersByPlatform(platformId)
         lastSubscriptionRefreshAt = now
         logger.info {
-            "pluginId=bilibili-publisher action=refresh_subscription publisherSize=${subscriptions.size}"
+            "pluginId=$pluginId action=refresh_subscription publisherSize=${subscriptions.size}"
         }
     }
 
@@ -214,13 +236,23 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
                 pollService.importCookiesJson(config.cookiesJson)
             }
         }.onFailure {
-            logger.warn(it) { "pluginId=bilibili-publisher action=import_stored_cookies result=failed" }
+            logger.warn(it) { "pluginId=$pluginId action=import_stored_cookies result=failed" }
         }
     }
 
     private fun persistCookiesIfLoggedIn(result: PublisherLoginResult) {
         if (result.status != PublisherLoginStatus.SUCCESS) return
         config = config.copy(cookiesJson = pollService.exportCookiesJson())
-        saveConfig(pluginId, config)
+        runCatching {
+            saveConfig(pluginId, config)
+        }.onFailure {
+            logger.warn(it) { "pluginId=$pluginId action=save_config result=failed" }
+        }
+    }
+
+    private fun startDetectionTask(): Boolean {
+        val started = taskScheduler.start(detectTask)
+        logger.info { "pluginId=$pluginId action=start_detection_task started=$started" }
+        return started
     }
 }

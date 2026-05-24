@@ -1,15 +1,10 @@
 package top.colter.dynamic.bilibili
 
-import com.fasterxml.jackson.databind.JsonNode
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import top.colter.bilibili.api.follow
+import top.colter.bilibili.api.getCurrentUserNav
 import top.colter.bilibili.api.getNewDynamic
 import top.colter.bilibili.api.getUserInfo
-import top.colter.bilibili.api.getUserNewDynamic
 import top.colter.bilibili.api.isFollow
 import top.colter.bilibili.auth.qrCode
 import top.colter.bilibili.client.BiliAuthClient
@@ -19,6 +14,8 @@ import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.login.QrCodeLoginData
 import top.colter.bilibili.data.login.QrCodeLoginResult
 import top.colter.bilibili.data.login.QrCodeLoginStatus
+import top.colter.bilibili.data.user.BiliUserNav
+import top.colter.bilibili.exception.BiliLoginException
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
@@ -26,11 +23,7 @@ import top.colter.dynamic.core.plugin.PublisherLoginAccount
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
-import java.net.URI
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
-import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.CancellationException
 
 internal data class BilibiliPublisherSnapshot(
     val userId: String,
@@ -44,13 +37,18 @@ internal data class BilibiliPublisherSnapshot(
 internal interface BilibiliPlatformGateway {
     suspend fun fetchSubscribedLatest(limit: Int): List<BiliDynamic>
 
-    suspend fun fetchLatest(uid: String, limit: Int): List<BiliDynamic>
-
     suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot?
 
     suspend fun queryFollowState(userId: String): FollowState
 
     suspend fun followPublisher(userId: String): FollowActionResult
+
+    suspend fun checkLoginState(): PublisherLoginResult {
+        return PublisherLoginResult(
+            status = PublisherLoginStatus.UNSUPPORTED,
+            message = "login status check is unsupported",
+        )
+    }
 
     suspend fun importCookiesJson(cookiesJson: String) {
     }
@@ -107,25 +105,11 @@ internal class BilibiliClientQrLoginGateway(
 internal class BilibiliPollService(
     private val requestIntervalMs: Long,
     private val client: BiliClient = BiliClient(),
+    private val currentUserNavProvider: suspend () -> BiliUserNav = { client.getCurrentUserNav() },
     private val qrLoginGatewayFactory: () -> BilibiliQrLoginGateway = { BilibiliClientQrLoginGateway() },
-    loginVerifier: (suspend (List<EditCookie>) -> PublisherLoginResult)? = null,
 ) : BilibiliPlatformGateway {
-    private val httpClient: HttpClient = HttpClient.newBuilder()
-        .followRedirects(HttpClient.Redirect.NEVER)
-        .build()
-    private val objectMapper: ObjectMapper = ObjectMapper().registerKotlinModule()
-    private val loginVerifier: suspend (List<EditCookie>) -> PublisherLoginResult =
-        loginVerifier ?: { cookies -> verifyLogin(cookies) }
-
     override suspend fun fetchSubscribedLatest(limit: Int): List<BiliDynamic> {
         val list = client.getNewDynamic(0, "")
-        applyRequestDelay()
-        return list.items.take(limit)
-    }
-
-    override suspend fun fetchLatest(uid: String, limit: Int): List<BiliDynamic> {
-        val userId = uid.toLongOrNull() ?: return emptyList()
-        val list = client.getUserNewDynamic(userId, false, "")
         applyRequestDelay()
         return list.items.take(limit)
     }
@@ -173,6 +157,34 @@ internal class BilibiliPollService(
         }
     }
 
+    override suspend fun checkLoginState(): PublisherLoginResult {
+        return try {
+            val nav = currentUserNavProvider()
+            PublisherLoginResult(
+                status = PublisherLoginStatus.SUCCESS,
+                message = "login success",
+                account = PublisherLoginAccount(
+                    userId = nav.mid.takeIf { it > 0 }?.toString(),
+                    name = nav.name.takeIf { it.isNotBlank() },
+                ),
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: BiliLoginException) {
+            PublisherLoginResult(
+                status = PublisherLoginStatus.FAILED,
+                message = "Bilibili is not logged in",
+            )
+        } catch (e: Throwable) {
+            PublisherLoginResult(
+                status = PublisherLoginStatus.FAILED,
+                message = e.message ?: "login check failed",
+            )
+        } finally {
+            applyRequestDelay()
+        }
+    }
+
     override suspend fun importCookiesJson(cookiesJson: String) {
         client.importEditCookiesJson(cookiesJson, true)
     }
@@ -204,14 +216,22 @@ internal class BilibiliPollService(
         onQrCode: suspend (PublisherQrLoginChallenge) -> Unit,
         onStatusChanged: suspend (PublisherLoginResult) -> Unit,
     ): PublisherLoginResult {
-        return runCatching {
+        return try {
             val outcome = qrLoginGatewayFactory().loginByQrCode(
                 onQrCode = { qrCodeData -> onQrCode(qrCodeData.toChallenge()) },
                 onStatusChanged = { qrCodeResult -> onStatusChanged(qrCodeResult.toPublisherLoginResult()) },
             )
-            importQrLoginCookies(outcome)
-        }.getOrElse { throwable ->
-            throwable.toQrFailureResult()
+            if (outcome.result.status == QrCodeLoginStatus.SUCCESS) {
+                importAndVerifyCookies {
+                    client.importEditCookiesJson(outcome.cookiesJson, true)
+                }
+            } else {
+                outcome.result.toPublisherLoginResult()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            e.toQrFailureResult()
         }
     }
 
@@ -223,18 +243,21 @@ internal class BilibiliPollService(
 
     private suspend fun importAndVerifyCookies(importer: suspend () -> Unit): PublisherLoginResult {
         val previousCookiesJson = client.exportEditCookiesJson()
-        return runCatching {
+        return try {
             importer()
-            val result = loginVerifier(client.exportEditCookies())
+            val result = checkLoginState()
             if (result.status != PublisherLoginStatus.SUCCESS) {
                 restoreCookies(previousCookiesJson)
             }
             result
-        }.getOrElse { throwable ->
+        } catch (e: CancellationException) {
+            restoreCookies(previousCookiesJson)
+            throw e
+        } catch (e: Throwable) {
             restoreCookies(previousCookiesJson)
             PublisherLoginResult(
                 status = PublisherLoginStatus.FAILED,
-                message = throwable.message ?: "login failed",
+                message = e.message ?: "login failed",
             )
         }
     }
@@ -246,60 +269,6 @@ internal class BilibiliPollService(
             } else {
                 client.importEditCookiesJson(cookiesJson, true)
             }
-        }
-    }
-
-    private suspend fun verifyLogin(cookies: List<EditCookie>): PublisherLoginResult {
-        val cookieHeader = cookies.toCookieHeader()
-        if (cookieHeader.isBlank()) {
-            return PublisherLoginResult(PublisherLoginStatus.FAILED, "no cookies were imported")
-        }
-
-        val response = sendRequest(
-            HttpRequest.newBuilder(URI.create(NAV_URL))
-                .header("User-Agent", USER_AGENT)
-                .header("Cookie", cookieHeader)
-                .GET()
-                .build()
-        )
-        val root = objectMapper.readTree(response.body())
-        val apiCode = root.path("code").asInt(Int.MIN_VALUE)
-        if (apiCode != 0) {
-            val message = root.path("message").asText("unknown error")
-            return PublisherLoginResult(
-                status = PublisherLoginStatus.FAILED,
-                message = "Bilibili login check failed: code=$apiCode, message=$message",
-            )
-        }
-
-        val data = root.path("data")
-        if (!data.path("isLogin").asBoolean(false)) {
-            return PublisherLoginResult(PublisherLoginStatus.FAILED, "Bilibili cookie is not logged in")
-        }
-
-        return PublisherLoginResult(
-            status = PublisherLoginStatus.SUCCESS,
-            message = "login success",
-            account = PublisherLoginAccount(
-                userId = data.optionalText("mid"),
-                name = data.optionalText("uname"),
-            ),
-        )
-    }
-
-    private suspend fun sendRequest(request: HttpRequest): HttpResponse<String> {
-        return withContext(Dispatchers.IO) {
-            httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-        }
-    }
-
-    private suspend fun importQrLoginCookies(outcome: BilibiliQrLoginOutcome): PublisherLoginResult {
-        return if (outcome.result.status == QrCodeLoginStatus.SUCCESS) {
-            importAndVerifyCookies {
-                client.importEditCookiesJson(outcome.cookiesJson, true)
-            }
-        } else {
-            outcome.result.toPublisherLoginResult()
         }
     }
 
@@ -371,22 +340,9 @@ internal class BilibiliPollService(
             .toList()
     }
 
-    private fun List<EditCookie>.toCookieHeader(): String {
-        return joinToString("; ") { cookie -> "${cookie.name}=${cookie.value}" }
-    }
-
-    private fun JsonNode.optionalText(field: String): String? {
-        val value = path(field)
-        if (value.isMissingNode || value.isNull) return null
-        return value.asText("").takeIf { it.isNotBlank() && it != "0" }
-    }
-
     private companion object {
-        private const val USER_AGENT: String =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
         private const val DEFAULT_COOKIE_DOMAIN: String = ".bilibili.com"
         private const val DEFAULT_COOKIE_PATH: String = "/"
         private const val QR_EXPIRES_SECONDS: Long = 180
-        private const val NAV_URL: String = "https://api.bilibili.com/x/web-interface/nav"
     }
 }

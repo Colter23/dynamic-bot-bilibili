@@ -1,9 +1,13 @@
 package top.colter.dynamic.bilibili
 
 import kotlinx.coroutines.runBlocking
+import top.colter.bilibili.data.LazyImage
 import top.colter.bilibili.data.login.QrCodeLoginData
 import top.colter.bilibili.data.login.QrCodeLoginResult
 import top.colter.bilibili.data.login.QrCodeLoginStatus
+import top.colter.bilibili.data.user.BiliUserNav
+import top.colter.bilibili.exception.BiliLoginException
+import top.colter.dynamic.core.data.PublisherCursor
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
@@ -14,6 +18,7 @@ import top.colter.dynamic.core.repository.PersistenceManager
 import top.colter.dynamic.core.task.TaskScheduler
 import top.colter.dynamic.core.task.TaskStatus
 import kotlin.io.path.createTempDirectory
+import java.util.LinkedHashSet
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -80,22 +85,78 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
-    fun `loginByQrCode should persist cookies on success`() = runBlocking {
+    fun `start should skip detection task when login check fails`() {
+        val scheduler = TaskScheduler()
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
             followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
-            qrLoginResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "login success"),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.FAILED, "not logged in"),
+        )
+        val plugin = testPlugin(gateway, taskScheduler = scheduler)
+        plugin.init()
+        plugin.start()
+
+        assertFalse(scheduler.isRunning("bilibili-detect"))
+        assertEquals(null, scheduler.snapshot("bilibili-detect"))
+    }
+
+    @Test
+    fun `loginByCookie should persist cookies and start detection task after startup skip`() = runBlocking {
+        val scheduler = TaskScheduler()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.FAILED, "not logged in"),
+            cookieLoginResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "cookie login success"),
             exportedCookiesJson = """[{"name":"SESSDATA","value":"demo"}]""",
         )
         var savedConfig: BilibiliPublisherConfig? = null
-        val plugin = testPlugin(gateway, saveConfig = { _, config -> savedConfig = config })
+        val plugin = testPlugin(
+            gateway,
+            saveConfig = { _, config -> savedConfig = config },
+            taskScheduler = scheduler,
+        )
         plugin.init()
+        plugin.start()
+
+        assertFalse(scheduler.isRunning("bilibili-detect"))
+
+        val result = plugin.loginByCookie("SESSDATA=demo")
+
+        assertEquals(PublisherLoginStatus.SUCCESS, result.status)
+        assertTrue(scheduler.isRunning("bilibili-detect"))
+        assertEquals("""[{"name":"SESSDATA","value":"demo"}]""", savedConfig?.cookiesJson)
+    }
+
+    @Test
+    fun `loginByQrCode should persist cookies and start detection task after startup skip`() = runBlocking {
+        val scheduler = TaskScheduler()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.FAILED, "not logged in"),
+            qrLoginResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "qr login success"),
+            exportedCookiesJson = """[{"name":"SESSDATA","value":"qr-demo"}]""",
+        )
+        var savedConfig: BilibiliPublisherConfig? = null
+        val plugin = testPlugin(
+            gateway,
+            saveConfig = { _, config -> savedConfig = config },
+            taskScheduler = scheduler,
+        )
+        plugin.init()
+        plugin.start()
+
+        assertFalse(scheduler.isRunning("bilibili-detect"))
 
         val result = plugin.loginByQrCode(onQrCode = {}, onStatusChanged = {})
 
         assertEquals(PublisherLoginStatus.SUCCESS, result.status)
-        assertEquals("""[{"name":"SESSDATA","value":"demo"}]""", savedConfig?.cookiesJson)
+        assertTrue(scheduler.isRunning("bilibili-detect"))
+        assertEquals("""[{"name":"SESSDATA","value":"qr-demo"}]""", savedConfig?.cookiesJson)
     }
 
     @Test
@@ -105,6 +166,7 @@ class BilibiliPublisherPluginTest {
             snapshot = null,
             followState = FollowState.FOLLOWING,
             followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
         )
         val plugin = testPlugin(gateway, taskScheduler = scheduler)
         plugin.init()
@@ -115,6 +177,19 @@ class BilibiliPublisherPluginTest {
         plugin.stop()
         assertFalse(scheduler.isRunning("bilibili-detect"))
         assertEquals(TaskStatus.CANCELLED, scheduler.snapshot("bilibili-detect")?.status)
+    }
+
+    @Test
+    fun `poll service checkLoginState should map BiliLoginException to failed result`() = runBlocking {
+        val service = BilibiliPollService(
+            requestIntervalMs = 0,
+            currentUserNavProvider = { throw BiliLoginException("not logged in") },
+        )
+
+        val result = service.checkLoginState()
+
+        assertEquals(PublisherLoginStatus.FAILED, result.status)
+        assertEquals("Bilibili is not logged in", result.message)
     }
 
     @Test
@@ -131,8 +206,17 @@ class BilibiliPublisherPluginTest {
         )
         val service = BilibiliPollService(
             requestIntervalMs = 0,
+            currentUserNavProvider = {
+                BiliUserNav(
+                    mid = 123L,
+                    name = "demo",
+                    face = LazyImage("https://example.com/face.png"),
+                    official = null,
+                    pendant = null,
+                    vip = null,
+                )
+            },
             qrLoginGatewayFactory = { authGateway },
-            loginVerifier = { PublisherLoginResult(PublisherLoginStatus.SUCCESS, "verified") },
         )
         var qrContent: String? = null
         var status: PublisherLoginResult? = null
@@ -162,7 +246,6 @@ class BilibiliPublisherPluginTest {
         val service = BilibiliPollService(
             requestIntervalMs = 0,
             qrLoginGatewayFactory = { authGateway },
-            loginVerifier = { PublisherLoginResult(PublisherLoginStatus.SUCCESS, "verified") },
         )
 
         val result = service.loginByQrCode(onQrCode = {}, onStatusChanged = {})
@@ -174,6 +257,7 @@ class BilibiliPublisherPluginTest {
         gateway: BilibiliPlatformGateway,
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
         taskScheduler: TaskScheduler = TaskScheduler(),
+        cursorStore: BilibiliCursorStore = InMemoryCursorStore(),
     ): BilibiliPublisherPlugin {
         val tempDir = createTempDirectory("dynamic-bot-bilibili-test").toFile()
         PersistenceManager.init(tempDir.resolve("test.db").path)
@@ -184,11 +268,10 @@ class BilibiliPublisherPluginTest {
                     subscriptionRefreshIntervalMs = 300_000,
                     fetchLimit = 5,
                     requestIntervalMs = 0,
-                    cursorPath = tempDir.resolve("cursor.yml").path,
                 )
             },
             serviceFactory = { gateway },
-            cursorStoreFactory = { path -> CursorStore(path) },
+            cursorStoreFactory = { cursorStore },
             saveConfig = saveConfig,
             taskScheduler = taskScheduler,
         )
@@ -198,15 +281,21 @@ class BilibiliPublisherPluginTest {
         private val snapshot: BilibiliPublisherSnapshot?,
         private val followState: FollowState,
         private val followActionResult: FollowActionResult,
+        private val loginStateResult: PublisherLoginResult = PublisherLoginResult(
+            PublisherLoginStatus.SUCCESS,
+            "login success",
+        ),
+        private val cookieLoginResult: PublisherLoginResult = PublisherLoginResult(
+            PublisherLoginStatus.SUCCESS,
+            "cookie login success",
+        ),
         private val qrLoginResult: PublisherLoginResult = PublisherLoginResult(
-            PublisherLoginStatus.UNSUPPORTED,
-            "unsupported",
+            PublisherLoginStatus.SUCCESS,
+            "qr login success",
         ),
         private val exportedCookiesJson: String = "",
     ) : BilibiliPlatformGateway {
         override suspend fun fetchSubscribedLatest(limit: Int) = emptyList<top.colter.bilibili.data.dynamic.BiliDynamic>()
-
-        override suspend fun fetchLatest(uid: String, limit: Int) = emptyList<top.colter.bilibili.data.dynamic.BiliDynamic>()
 
         override suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot? = snapshot
 
@@ -214,11 +303,16 @@ class BilibiliPublisherPluginTest {
 
         override suspend fun followPublisher(userId: String): FollowActionResult = followActionResult
 
+        override suspend fun checkLoginState(): PublisherLoginResult = loginStateResult
+
+        override suspend fun loginByCookie(cookie: String): PublisherLoginResult = cookieLoginResult
+
         override suspend fun loginByQrCode(
             onQrCode: suspend (PublisherQrLoginChallenge) -> Unit,
             onStatusChanged: suspend (PublisherLoginResult) -> Unit,
         ): PublisherLoginResult {
             onQrCode(PublisherQrLoginChallenge(qrContent = "https://example.com/qr"))
+            onStatusChanged(PublisherLoginResult(PublisherLoginStatus.PENDING, "waiting"))
             return qrLoginResult
         }
 
@@ -244,6 +338,29 @@ class BilibiliPublisherPluginTest {
                 )
             )
             return BilibiliQrLoginOutcome(result, cookiesJson)
+        }
+    }
+
+    private class InMemoryCursorStore : BilibiliCursorStore {
+        private val states: MutableMap<String, PublisherCursor> = linkedMapOf()
+
+        override fun get(publisherId: String): PublisherCursor? = states[publisherId]
+
+        override fun markSeen(publisherId: String, dynamicId: String, timestamp: Long): PublisherCursor {
+            val previous = states[publisherId]
+            val recent = LinkedHashSet(previous?.recentDynamicIds ?: emptyList())
+            recent.add(dynamicId)
+            while (recent.size > 50) {
+                recent.remove(recent.first())
+            }
+            val updated = PublisherCursor(
+                publisherId = publisherId.toInt(),
+                lastSeenDynamicId = dynamicId,
+                lastSeenAt = timestamp,
+                recentDynamicIds = recent.toList(),
+            )
+            states[publisherId] = updated
+            return updated
         }
     }
 }
