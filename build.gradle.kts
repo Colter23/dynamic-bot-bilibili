@@ -12,7 +12,6 @@ repositories {
 
 dependencies {
     implementation("top.colter.bilibili:bilibili-client:0.0.1")
-    implementation("io.ktor:ktor-http-jvm:3.1.1")
 
     implementation("top.colter.dynamic:dynamic-bot-core:0.0.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")

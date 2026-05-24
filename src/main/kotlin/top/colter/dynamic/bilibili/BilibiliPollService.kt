@@ -4,17 +4,21 @@ import kotlinx.coroutines.delay
 import top.colter.bilibili.api.follow
 import top.colter.bilibili.api.getCurrentUserNav
 import top.colter.bilibili.api.getNewDynamic
+import top.colter.bilibili.api.getGroupList
 import top.colter.bilibili.api.getUserInfo
+import top.colter.bilibili.api.modifyGroupUsers
 import top.colter.bilibili.api.isFollow
+import top.colter.bilibili.api.createGroup
 import top.colter.bilibili.auth.qrCode
 import top.colter.bilibili.client.BiliAuthClient
 import top.colter.bilibili.client.BiliClient
 import top.colter.bilibili.data.EditCookie
-import top.colter.bilibili.data.dynamic.BiliDynamic
+import top.colter.bilibili.data.dynamic.BiliDynamicList
 import top.colter.bilibili.data.login.QrCodeLoginData
 import top.colter.bilibili.data.login.QrCodeLoginResult
 import top.colter.bilibili.data.login.QrCodeLoginStatus
 import top.colter.bilibili.data.user.BiliUserNav
+import top.colter.bilibili.data.user.BiliGroup
 import top.colter.bilibili.exception.BiliLoginException
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
@@ -35,13 +39,27 @@ internal data class BilibiliPublisherSnapshot(
 )
 
 internal interface BilibiliPlatformGateway {
-    suspend fun fetchSubscribedLatest(limit: Int): List<BiliDynamic>
+    suspend fun fetchNewDynamicPage(page: Int = 1, type: String = "all"): BiliDynamicList {
+        throw UnsupportedOperationException("dynamic page fetch is unsupported")
+    }
 
     suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot?
 
     suspend fun queryFollowState(userId: String): FollowState
 
     suspend fun followPublisher(userId: String): FollowActionResult
+
+    suspend fun fetchFollowGroups(): List<BiliGroup> {
+        throw UnsupportedOperationException("follow group api is unsupported")
+    }
+
+    suspend fun createFollowGroup(tag: String) {
+        throw UnsupportedOperationException("follow group api is unsupported")
+    }
+
+    suspend fun addUsersToFollowGroup(fids: Iterable<Long>, tagIds: Iterable<Long>) {
+        throw UnsupportedOperationException("follow group api is unsupported")
+    }
 
     suspend fun checkLoginState(): PublisherLoginResult {
         return PublisherLoginResult(
@@ -108,10 +126,10 @@ internal class BilibiliPollService(
     private val currentUserNavProvider: suspend () -> BiliUserNav = { client.getCurrentUserNav() },
     private val qrLoginGatewayFactory: () -> BilibiliQrLoginGateway = { BilibiliClientQrLoginGateway() },
 ) : BilibiliPlatformGateway {
-    override suspend fun fetchSubscribedLatest(limit: Int): List<BiliDynamic> {
-        val list = client.getNewDynamic(0, "")
+    override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
+        val list = client.getNewDynamic(page, type)
         applyRequestDelay()
-        return list.items.take(limit)
+        return list
     }
 
     override suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot? {
@@ -155,6 +173,22 @@ internal class BilibiliPollService(
                 FollowActionResult(FollowActionStatus.FOLLOWED)
             }
         }
+    }
+
+    override suspend fun fetchFollowGroups(): List<BiliGroup> {
+        val groups = client.getGroupList()
+        applyRequestDelay()
+        return groups
+    }
+
+    override suspend fun createFollowGroup(tag: String) {
+        client.createGroup(tag)
+        applyRequestDelay()
+    }
+
+    override suspend fun addUsersToFollowGroup(fids: Iterable<Long>, tagIds: Iterable<Long>) {
+        client.modifyGroupUsers(fids, tagIds)
+        applyRequestDelay()
     }
 
     override suspend fun checkLoginState(): PublisherLoginResult {

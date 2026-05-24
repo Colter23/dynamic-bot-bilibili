@@ -1,6 +1,8 @@
 package top.colter.dynamic.bilibili
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.dynamic.core.config.DefaultConfigService
 import top.colter.dynamic.core.config.loadOrCreate
@@ -11,9 +13,12 @@ import top.colter.dynamic.core.data.PublisherCursor
 import top.colter.dynamic.core.data.PublisherProfile
 import top.colter.dynamic.core.data.PublisherType
 import top.colter.dynamic.core.data.Subscriber
+import top.colter.dynamic.core.data.hasSeen
+import top.colter.dynamic.core.data.replayLowerBoundAtEpochSeconds
 import top.colter.dynamic.core.event.DynamicEvent
 import top.colter.dynamic.core.event.broadcast
 import top.colter.dynamic.core.plugin.FollowActionResult
+import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
 import top.colter.dynamic.core.plugin.PlatformPublisherPlugin
 import top.colter.dynamic.core.plugin.PublisherLoginMethod
@@ -45,6 +50,8 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     }
     private var taskScheduler: TaskScheduler = TaskScheduler()
 
+    private val followGroupMutex: Mutex = Mutex()
+
     private lateinit var config: BilibiliPublisherConfig
     private lateinit var pollService: BilibiliPlatformGateway
     private lateinit var mapper: BilibiliDynamicMapper
@@ -56,6 +63,9 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
 
     @Volatile
     private var lastSubscriptionRefreshAt: Long = 0
+
+    @Volatile
+    private var followGroupId: Long? = null
 
     internal constructor(
         loadConfig: (String) -> BilibiliPublisherConfig,
@@ -99,9 +109,9 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     override fun start() {
         val loginResult = runBlocking { pollService.checkLoginState() }
         if (loginResult.status == PublisherLoginStatus.SUCCESS) {
-            val started = startDetectionTask()
+            val taskStarted = runBlocking { bootstrapLoggedInState(allowReplay = true) }
             logger.info {
-                "pluginId=$pluginId action=start result=started loginAccount=${loginResult.account?.name ?: loginResult.account?.userId ?: "unknown"} taskStarted=$started"
+                "pluginId=$pluginId action=start result=started loginAccount=${loginResult.account?.name ?: loginResult.account?.userId ?: "unknown"} taskStarted=$taskStarted"
             }
         } else {
             logger.warn {
@@ -141,14 +151,18 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     }
 
     override suspend fun followPublisher(userId: String): FollowActionResult {
-        return pollService.followPublisher(userId)
+        val result = pollService.followPublisher(userId)
+        if (result.status == FollowActionStatus.FOLLOWED || result.status == FollowActionStatus.ALREADY_FOLLOWING) {
+            addPublisherToFollowGroup(userId)
+        }
+        return result
     }
 
     override suspend fun loginByCookie(cookie: String): PublisherLoginResult {
         val result = pollService.loginByCookie(cookie)
         persistCookiesIfLoggedIn(result)
         if (result.status == PublisherLoginStatus.SUCCESS) {
-            startDetectionTask()
+            bootstrapLoggedInState(allowReplay = !taskScheduler.isRunning(detectTaskId))
         }
         return result
     }
@@ -160,7 +174,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
         val result = pollService.loginByQrCode(onQrCode, onStatusChanged)
         persistCookiesIfLoggedIn(result)
         if (result.status == PublisherLoginStatus.SUCCESS) {
-            startDetectionTask()
+            bootstrapLoggedInState(allowReplay = !taskScheduler.isRunning(detectTaskId))
         }
         return result
     }
@@ -170,7 +184,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
         if (subscriptions.isEmpty()) return
 
         val start = System.currentTimeMillis()
-        val followedDynamics = runCatching { pollService.fetchSubscribedLatest(config.fetchLimit) }
+        val followedDynamics = runCatching { pollService.fetchNewDynamicPage(1).items.take(config.fetchLimit.coerceAtLeast(0)) }
             .onFailure {
                 logger.error(it) {
                     "pluginId=$pluginId action=poll result=failed"
@@ -205,7 +219,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
                 .asReversed()
                 .forEach dynamicLoop@{ raw ->
                     val dynamicId = raw.id.toString()
-                    if (cursor.lastSeenDynamicId == dynamicId || cursor.recentDynamicIds.contains(dynamicId)) {
+                    if (cursor.hasSeen(dynamicId)) {
                         return@dynamicLoop
                     }
 
@@ -216,6 +230,210 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
                     cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
                 }
         }
+    }
+
+    private suspend fun bootstrapLoggedInState(allowReplay: Boolean): Boolean {
+        refreshSubscriptions(force = true)
+        runCatching { ensureFollowGroupInitialized() }
+            .onFailure {
+                logger.warn(it) {
+                    "pluginId=$pluginId action=follow_group_init result=failed"
+                }
+            }
+        if (config.replayWindowHours > 0 && allowReplay) {
+            runCatching { replayMissingDynamics() }
+                .onFailure {
+                    logger.warn(it) {
+                        "pluginId=$pluginId action=replay result=failed"
+                    }
+                }
+        } else if (!taskScheduler.isRunning(detectTaskId)) {
+            runCatching { warmUpExistingCursors() }
+                .onFailure {
+                    logger.warn(it) {
+                        "pluginId=$pluginId action=bootstrap_warmup result=failed"
+                    }
+                }
+        }
+        return startDetectionTask()
+    }
+
+    private suspend fun warmUpExistingCursors() {
+        if (subscriptions.isEmpty()) return
+
+        val followedDynamics = runCatching { pollService.fetchNewDynamicPage(1).items.take(config.fetchLimit.coerceAtLeast(0)) }
+            .onFailure {
+                logger.error(it) {
+                    "pluginId=$pluginId action=bootstrap_warmup_poll result=failed"
+                }
+            }
+            .getOrElse { emptyList() }
+        if (followedDynamics.isEmpty()) return
+
+        val dynamicsByPublisher = followedDynamics
+            .groupBy { it.mid }
+            .mapValues { (_, dynamics) ->
+                dynamics.sortedWith(compareByDescending<BiliDynamic> { it.time }.thenByDescending { it.id })
+            }
+
+        subscriptions.forEach publisherLoop@{ (publisher, _) ->
+            val publisherId = publisher.id.toString()
+            val uid = publisher.userId?.toLongOrNull() ?: return@publisherLoop
+            if (cursorStore.get(publisherId) == null) return@publisherLoop
+
+            val publisherDynamics = dynamicsByPublisher[uid].orEmpty()
+            if (publisherDynamics.isEmpty()) return@publisherLoop
+
+            var cursor = cursorStore.get(publisherId) ?: return@publisherLoop
+            publisherDynamics
+                .asReversed()
+                .forEach dynamicLoop@{ raw ->
+                    val dynamicId = raw.id.toString()
+                    if (cursor.hasSeen(dynamicId)) {
+                        return@dynamicLoop
+                    }
+                    cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
+                }
+        }
+    }
+
+    private suspend fun replayMissingDynamics() {
+        if (config.replayWindowHours <= 0) return
+        if (subscriptions.isEmpty()) return
+
+        val nowEpochSeconds = System.currentTimeMillis() / 1000
+        val targets = subscriptions.mapNotNull { (publisher, subscribers) ->
+            val userId = publisher.userId?.toLongOrNull() ?: return@mapNotNull null
+            val cursor = cursorStore.get(publisher.id.toString()) ?: return@mapNotNull null
+            val lowerBound = cursor.replayLowerBoundAtEpochSeconds(config.replayWindowHours, nowEpochSeconds) ?: return@mapNotNull null
+            ReplayTarget(
+                publisher = publisher,
+                userId = userId,
+                subscribers = subscribers,
+                cursor = cursor,
+                lowerBound = lowerBound,
+            )
+        }
+        if (targets.isEmpty()) return
+
+        val globalLowerBound = targets.minOf { it.lowerBound }
+        val collectedDynamics = mutableListOf<BiliDynamic>()
+
+        var page = 1
+        while (true) {
+            val pageResult = pollService.fetchNewDynamicPage(page)
+            val items = pageResult.items
+            if (items.isEmpty()) break
+
+            collectedDynamics.addAll(items.filter { it.time >= globalLowerBound })
+
+            val oldestTime = items.minOf { it.time }
+            if (!pageResult.hasMore || oldestTime < globalLowerBound) {
+                break
+            }
+            page += 1
+        }
+
+        if (collectedDynamics.isEmpty()) return
+
+        val dynamicsByPublisher = collectedDynamics
+            .groupBy { it.mid }
+            .mapValues { (_, dynamics) ->
+                dynamics.sortedWith(compareBy<BiliDynamic> { it.time }.thenBy { it.id })
+            }
+
+        targets.forEach { target ->
+            var cursor = target.cursor
+            dynamicsByPublisher[target.userId].orEmpty().forEach dynamicLoop@{ raw ->
+                if (raw.time < target.lowerBound) return@dynamicLoop
+                val dynamicId = raw.id.toString()
+                if (cursor.hasSeen(dynamicId)) return@dynamicLoop
+
+                val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
+                target.subscribers.forEach { subscriber ->
+                    DynamicEvent(source = pluginId, target = subscriber, dynamic = dynamic).broadcast()
+                }
+                cursor = cursorStore.markSeen(target.publisher.id.toString(), dynamicId, raw.time)
+            }
+        }
+    }
+
+    private suspend fun ensureFollowGroupInitialized() {
+        ensureFollowGroupId()
+    }
+
+    private suspend fun addPublisherToFollowGroup(userId: String) {
+        val groupId = ensureFollowGroupId() ?: return
+        val uid = userId.toLongOrNull() ?: return
+        runCatching {
+            pollService.addUsersToFollowGroup(listOf(uid), listOf(groupId))
+        }.onFailure {
+            logger.warn(it) {
+                "pluginId=$pluginId action=follow_group_add result=failed userId=$userId groupId=$groupId"
+            }
+        }
+    }
+
+    private suspend fun ensureFollowGroupId(): Long? {
+        val groupName = normalizedFollowGroupName() ?: return null
+        followGroupId?.let { return it }
+
+        return followGroupMutex.withLock {
+            followGroupId?.let { return@withLock it }
+            val resolved = resolveFollowGroupId(groupName)
+            followGroupId = resolved
+            resolved
+        }
+    }
+
+    private suspend fun resolveFollowGroupId(groupName: String): Long? {
+        val existingGroups = runCatching {
+            pollService.fetchFollowGroups()
+        }.onFailure {
+            logger.warn(it) {
+                "pluginId=$pluginId action=follow_group_fetch result=failed groupName=$groupName"
+            }
+        }.getOrNull() ?: return null
+
+        existingGroups.firstOrNull { it.name == groupName }?.let { matched ->
+            logger.info {
+                "pluginId=$pluginId action=follow_group_resolve result=found groupName=$groupName groupId=${matched.tid}"
+            }
+            return matched.tid
+        }
+
+        runCatching {
+            pollService.createFollowGroup(groupName)
+        }.onFailure {
+            logger.warn(it) {
+                "pluginId=$pluginId action=follow_group_create result=failed groupName=$groupName"
+            }
+        }
+
+        val refreshedGroups = runCatching {
+            pollService.fetchFollowGroups()
+        }.onFailure {
+            logger.warn(it) {
+                "pluginId=$pluginId action=follow_group_reload result=failed groupName=$groupName"
+            }
+        }.getOrNull() ?: return null
+
+        val createdGroup = refreshedGroups.firstOrNull { it.name == groupName }
+        if (createdGroup == null) {
+            logger.warn {
+                "pluginId=$pluginId action=follow_group_resolve result=missing groupName=$groupName"
+            }
+            return null
+        }
+
+        logger.info {
+            "pluginId=$pluginId action=follow_group_resolve result=created groupName=$groupName groupId=${createdGroup.tid}"
+        }
+        return createdGroup.tid
+    }
+
+    private fun normalizedFollowGroupName(): String? {
+        return config.followGroupName.trim().takeIf { it.isNotBlank() }
     }
 
     private fun refreshSubscriptions(force: Boolean) {
@@ -255,4 +473,12 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
         logger.info { "pluginId=$pluginId action=start_detection_task started=$started" }
         return started
     }
+
+    private data class ReplayTarget(
+        val publisher: Publisher,
+        val userId: Long,
+        val subscribers: List<Subscriber>,
+        val cursor: PublisherCursor,
+        val lowerBound: Long,
+    )
 }

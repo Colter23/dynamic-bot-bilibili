@@ -5,5 +5,7 @@ public data class BilibiliPublisherConfig(
     val subscriptionRefreshIntervalMs: Long = 300_000,
     val fetchLimit: Int = 5,
     val requestIntervalMs: Long = 500,
+    val replayWindowHours: Int = 0,
+    val followGroupName: String = "",
     val cookiesJson: String = "",
 )
