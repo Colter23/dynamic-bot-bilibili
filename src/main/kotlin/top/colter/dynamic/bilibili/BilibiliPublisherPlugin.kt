@@ -18,10 +18,11 @@ import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import top.colter.dynamic.core.repository.SubscribeRepository
-import top.colter.dynamic.core.task.IntervalTask
-import top.colter.dynamic.core.task.TaskEngine
-import top.colter.dynamic.core.task.TaskRegistry
+import top.colter.dynamic.core.task.TaskDefinition
+import top.colter.dynamic.core.task.TaskSchedule
+import top.colter.dynamic.core.task.TaskScheduler
 import top.colter.dynamic.core.tools.logger
+import kotlin.time.Duration.Companion.milliseconds
 
 public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     private val pluginId: String = "bilibili-publisher"
@@ -39,12 +40,13 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     private var saveConfig: (String, BilibiliPublisherConfig) -> Unit = { id, config ->
         DefaultConfigService.save(id, config)
     }
+    private var taskScheduler: TaskScheduler = TaskScheduler()
 
     private lateinit var config: BilibiliPublisherConfig
     private lateinit var pollService: BilibiliPlatformGateway
     private lateinit var mapper: BilibiliDynamicMapper
     private lateinit var cursorStore: CursorStore
-    private lateinit var detectTask: IntervalTask
+    private lateinit var detectTask: TaskDefinition
 
     @Volatile
     private var subscriptions: Map<Publisher, List<top.colter.dynamic.core.data.Subscriber>> = emptyMap()
@@ -57,11 +59,13 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
         serviceFactory: (Long) -> BilibiliPlatformGateway,
         cursorStoreFactory: (String) -> CursorStore,
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
+        taskScheduler: TaskScheduler = TaskScheduler(),
     ) : this() {
         this.loadConfig = loadConfig
         this.serviceFactory = serviceFactory
         this.cursorStoreFactory = cursorStoreFactory
         this.saveConfig = saveConfig
+        this.taskScheduler = taskScheduler
     }
 
     override val supportedLoginMethods: Set<PublisherLoginMethod> = setOf(
@@ -75,13 +79,13 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
         importStoredCookies()
         mapper = BilibiliDynamicMapper()
         cursorStore = cursorStoreFactory(config.cursorPath)
-        detectTask = IntervalTask(
+        detectTask = TaskDefinition(
             id = detectTaskId,
-            intervalMillis = config.pollingIntervalMs,
-            runImmediately = true,
-        ) {
-            detectAndPublish()
-        }
+            schedule = TaskSchedule.FixedDelay(config.pollingIntervalMs.milliseconds, runImmediately = true),
+            action = {
+                detectAndPublish()
+            },
+        )
 
         refreshSubscriptions(force = true)
         logger.info {
@@ -90,16 +94,13 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     }
 
     override fun start() {
-        if (TaskRegistry.get(detectTaskId) == null) {
-            TaskRegistry.register(detectTask)
-        }
-        val started = TaskEngine.startById(detectTaskId)
+        val started = taskScheduler.start(detectTask)
         logger.info { "pluginId=bilibili-publisher action=start started=$started" }
     }
 
     override fun stop() {
         runBlocking {
-            TaskEngine.unregisterAndCancel(detectTaskId)
+            taskScheduler.stop(detectTaskId)
         }
         logger.info { "pluginId=bilibili-publisher action=stop" }
     }

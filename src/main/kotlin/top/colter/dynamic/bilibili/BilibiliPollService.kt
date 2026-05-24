@@ -134,14 +134,13 @@ internal class BilibiliPollService(
         val uid = userId.toLongOrNull() ?: return null
         val info = client.getUserInfo(uid)
         applyRequestDelay()
-        val official = info.official?.title?.takeIf { it.isNotBlank() }
-            ?: info.official?.desc?.takeIf { it.isNotBlank() }
         return BilibiliPublisherSnapshot(
             userId = info.mid.toString(),
             name = info.name,
-            official = official,
+            official = info.official?.title?.takeIf { it.isNotBlank() }
+                ?: info.official?.desc?.takeIf { it.isNotBlank() },
             faceUrl = info.face.url,
-            headerUrl = info.topPhoto.ifBlank { null },
+            headerUrl = null,
             pendantUrl = info.pendant?.image?.url?.takeIf { it.isNotBlank() },
         )
     }

@@ -11,10 +11,14 @@ import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import top.colter.dynamic.core.repository.PersistenceManager
+import top.colter.dynamic.core.task.TaskScheduler
+import top.colter.dynamic.core.task.TaskStatus
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 class BilibiliPublisherPluginTest {
 
@@ -85,13 +89,32 @@ class BilibiliPublisherPluginTest {
             exportedCookiesJson = """[{"name":"SESSDATA","value":"demo"}]""",
         )
         var savedConfig: BilibiliPublisherConfig? = null
-        val plugin = testPlugin(gateway) { _, config -> savedConfig = config }
+        val plugin = testPlugin(gateway, saveConfig = { _, config -> savedConfig = config })
         plugin.init()
 
         val result = plugin.loginByQrCode(onQrCode = {}, onStatusChanged = {})
 
         assertEquals(PublisherLoginStatus.SUCCESS, result.status)
         assertEquals("""[{"name":"SESSDATA","value":"demo"}]""", savedConfig?.cookiesJson)
+    }
+
+    @Test
+    fun `start and stop should manage detection task scheduler`() {
+        val scheduler = TaskScheduler()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+        )
+        val plugin = testPlugin(gateway, taskScheduler = scheduler)
+        plugin.init()
+
+        plugin.start()
+        assertTrue(scheduler.isRunning("bilibili-detect"))
+
+        plugin.stop()
+        assertFalse(scheduler.isRunning("bilibili-detect"))
+        assertEquals(TaskStatus.CANCELLED, scheduler.snapshot("bilibili-detect")?.status)
     }
 
     @Test
@@ -150,6 +173,7 @@ class BilibiliPublisherPluginTest {
     private fun testPlugin(
         gateway: BilibiliPlatformGateway,
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
+        taskScheduler: TaskScheduler = TaskScheduler(),
     ): BilibiliPublisherPlugin {
         val tempDir = createTempDirectory("dynamic-bot-bilibili-test").toFile()
         PersistenceManager.init(tempDir.resolve("test.db").path)
@@ -166,6 +190,7 @@ class BilibiliPublisherPluginTest {
             serviceFactory = { gateway },
             cursorStoreFactory = { path -> CursorStore(path) },
             saveConfig = saveConfig,
+            taskScheduler = taskScheduler,
         )
     }
 
