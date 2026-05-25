@@ -17,6 +17,7 @@ import top.colter.bilibili.exception.BiliLoginException
 import top.colter.dynamic.core.data.LazyImage as CoreLazyImage
 import top.colter.dynamic.core.data.PublisherCursor
 import top.colter.dynamic.core.data.PublisherProfile
+import top.colter.dynamic.core.data.SubscriberType
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
@@ -25,8 +26,8 @@ import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import top.colter.dynamic.core.repository.PersistenceManager
 import top.colter.dynamic.core.repository.PublisherRepository
-import top.colter.dynamic.core.repository.SubscribeRepository
 import top.colter.dynamic.core.repository.SubscriberRepository
+import top.colter.dynamic.core.repository.SubscriptionRepository
 import top.colter.dynamic.core.task.TaskScheduler
 import top.colter.dynamic.core.task.TaskStatus
 import kotlin.io.path.createTempDirectory
@@ -56,10 +57,10 @@ class BilibiliPublisherPluginTest {
 
         val profile = plugin.fetchPublisherProfile("123")
 
-        assertEquals("bilibili", profile?.platform)
-        assertEquals("123", profile?.userId)
+        assertEquals("bilibili", profile?.platformId)
+        assertEquals("123", profile?.externalId)
         assertEquals("demo-up", profile?.name)
-        assertEquals("https://example.com/face.png", profile?.face?.url)
+        assertEquals("https://example.com/face.png", profile?.face?.uri)
     }
 
     @Test
@@ -143,10 +144,10 @@ class BilibiliPublisherPluginTest {
             recentDynamicIds = emptyList(),
         )
         cursorStore.put(seeded.publisher.id.toString(), existingCursor)
-        val page1Newest = buildDynamic(now - 3_600L, seeded.publisher.userId!!.toLong(), "demo-up", 1)
-        val page1Older = buildDynamic(now - 3_700L, seeded.publisher.userId!!.toLong(), "demo-up", 2)
-        val page2Newest = buildDynamic(now - 3_800L, seeded.publisher.userId!!.toLong(), "demo-up", 3)
-        val page2Older = buildDynamic(now - 3_900L, seeded.publisher.userId!!.toLong(), "demo-up", 4)
+        val page1Newest = buildDynamic(now - 3_600L, seeded.publisher.externalId.toLong(), "demo-up", 1)
+        val page1Older = buildDynamic(now - 3_700L, seeded.publisher.externalId.toLong(), "demo-up", 2)
+        val page2Newest = buildDynamic(now - 3_800L, seeded.publisher.externalId.toLong(), "demo-up", 3)
+        val page2Older = buildDynamic(now - 3_900L, seeded.publisher.externalId.toLong(), "demo-up", 4)
         gateway.setDynamicPages(
             mapOf(
                 1 to dynamicPage(true, page1Newest, page1Older),
@@ -194,10 +195,10 @@ class BilibiliPublisherPluginTest {
             recentDynamicIds = emptyList(),
         )
         cursorStore.put(seeded.publisher.id.toString(), existingCursor)
-        val page1Newest = buildDynamic(now - 3_600L, seeded.publisher.userId!!.toLong(), "demo-up", 1)
-        val page1Older = buildDynamic(now - 3_700L, seeded.publisher.userId!!.toLong(), "demo-up", 2)
-        val page2Newest = buildDynamic(now - 3_800L, seeded.publisher.userId!!.toLong(), "demo-up", 3)
-        val page2Older = buildDynamic(now - 3_900L, seeded.publisher.userId!!.toLong(), "demo-up", 4)
+        val page1Newest = buildDynamic(now - 3_600L, seeded.publisher.externalId.toLong(), "demo-up", 1)
+        val page1Older = buildDynamic(now - 3_700L, seeded.publisher.externalId.toLong(), "demo-up", 2)
+        val page2Newest = buildDynamic(now - 3_800L, seeded.publisher.externalId.toLong(), "demo-up", 3)
+        val page2Older = buildDynamic(now - 3_900L, seeded.publisher.externalId.toLong(), "demo-up", 4)
         gateway.setDynamicPages(
             mapOf(
                 1 to dynamicPage(true, page1Newest, page1Older),
@@ -482,20 +483,21 @@ class BilibiliPublisherPluginTest {
     }
 
     private fun seedPublisherAndSubscriber(): SeededSubscription {
-        val publisher = PublisherRepository.upsert(
+        val publisher = PublisherRepository.upsertProfile(
             PublisherProfile(
-                platform = "bilibili",
-                userId = "123",
+                platformId = "bilibili",
+                externalId = "123",
                 name = "demo-up",
                 face = CoreLazyImage("https://example.com/face.png"),
             ),
         ).value
         val subscriber = SubscriberRepository.upsert(
-            platform = "qq",
-            userId = "9001",
+            platformId = "qq",
+            targetId = "9001",
             name = "demo-subscriber",
+            type = SubscriberType.GROUP,
         ).value
-        SubscribeRepository.subscribe(subscriber.id.toString(), publisher.id.toString())
+        SubscriptionRepository.subscribe(subscriber.id, publisher.id)
         return SeededSubscription(publisher = publisher, subscriber = subscriber)
     }
 
