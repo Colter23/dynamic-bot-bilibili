@@ -10,8 +10,9 @@ import top.colter.dynamic.core.data.DynamicMediaVideo
 import top.colter.dynamic.core.data.DynamicMediaVideoStats
 import top.colter.dynamic.core.data.DynamicStats
 import top.colter.dynamic.core.data.LazyImage
+import top.colter.dynamic.core.data.PlatformDescriptor
+import top.colter.dynamic.core.data.PlatformKind
 import top.colter.dynamic.core.data.Publisher
-import top.colter.dynamic.core.data.PublisherPlatform
 import top.colter.dynamic.core.data.PublisherType
 
 internal class BilibiliDynamicMapper {
@@ -41,7 +42,7 @@ internal class BilibiliDynamicMapper {
             dynamicId = dynamicId,
             publisher = fallbackPublisher.copy(
                 type = PublisherType.USER,
-                userId = source.mid.takeIf { it > 0 }?.toString() ?: fallbackPublisher.userId,
+                externalId = source.mid.takeIf { it > 0 }?.toString() ?: fallbackPublisher.externalId,
                 name = source.name.takeIf { it.isNotBlank() } ?: fallbackPublisher.name,
                 face = source.modules.author.face?.url
                     ?.takeIf { it.isNotBlank() }
@@ -97,11 +98,12 @@ internal class BilibiliDynamicMapper {
     }
 
     private companion object {
-        private val BILIBILI_PLATFORM: PublisherPlatform = PublisherPlatform(
+        private val BILIBILI_PLATFORM: PlatformDescriptor = PlatformDescriptor(
             id = "bilibili",
             name = "Bilibili",
-            link = "https://www.bilibili.com",
-            icon = "https://www.bilibili.com/favicon.ico",
+            homepage = "https://www.bilibili.com",
+            iconUri = "https://www.bilibili.com/favicon.ico",
+            kind = PlatformKind.PUBLISHER,
         )
     }
 }

@@ -7,6 +7,7 @@ import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.dynamic.core.config.DefaultConfigService
 import top.colter.dynamic.core.config.loadOrCreate
 import top.colter.dynamic.core.config.save
+import top.colter.dynamic.core.data.EntityState
 import top.colter.dynamic.core.data.LazyImage
 import top.colter.dynamic.core.data.Publisher
 import top.colter.dynamic.core.data.PublisherCursor
@@ -25,7 +26,7 @@ import top.colter.dynamic.core.plugin.PublisherLoginMethod
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
-import top.colter.dynamic.core.repository.SubscribeRepository
+import top.colter.dynamic.core.repository.SubscriptionRepository
 import top.colter.dynamic.core.task.TaskDefinition
 import top.colter.dynamic.core.task.TaskSchedule
 import top.colter.dynamic.core.task.TaskScheduler
@@ -134,12 +135,12 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
     override suspend fun fetchPublisherProfile(userId: String): PublisherProfile? {
         val snapshot = pollService.fetchPublisherProfile(userId) ?: return null
         return PublisherProfile(
-            platform = platformId,
-            userId = snapshot.userId,
+            platformId = platformId,
+            externalId = snapshot.userId,
             type = PublisherType.USER,
             name = snapshot.name,
             official = snapshot.official,
-            state = 1,
+            state = EntityState.ACTIVE,
             face = LazyImage(snapshot.faceUrl),
             header = snapshot.headerUrl?.let(::LazyImage),
             pendant = snapshot.pendantUrl?.let(::LazyImage),
@@ -200,7 +201,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
 
         subscriptions.forEach publisherLoop@{ (publisher, subscribers) ->
             val publisherId = publisher.id.toString()
-            val uid = publisher.userId?.toLongOrNull() ?: return@publisherLoop
+            val uid = publisher.externalId.toLongOrNull() ?: return@publisherLoop
             val publisherDynamics = dynamicsByPublisher[uid].orEmpty()
             if (publisherDynamics.isEmpty()) return@publisherLoop
 
@@ -278,7 +279,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
 
         subscriptions.forEach publisherLoop@{ (publisher, _) ->
             val publisherId = publisher.id.toString()
-            val uid = publisher.userId?.toLongOrNull() ?: return@publisherLoop
+            val uid = publisher.externalId.toLongOrNull() ?: return@publisherLoop
             if (cursorStore.get(publisherId) == null) return@publisherLoop
 
             val publisherDynamics = dynamicsByPublisher[uid].orEmpty()
@@ -303,7 +304,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
 
         val nowEpochSeconds = System.currentTimeMillis() / 1000
         val targets = subscriptions.mapNotNull { (publisher, subscribers) ->
-            val userId = publisher.userId?.toLongOrNull() ?: return@mapNotNull null
+            val userId = publisher.externalId.toLongOrNull() ?: return@mapNotNull null
             val cursor = cursorStore.get(publisher.id.toString()) ?: return@mapNotNull null
             val lowerBound = cursor.replayLowerBoundAtEpochSeconds(config.replayWindowHours, nowEpochSeconds) ?: return@mapNotNull null
             ReplayTarget(
@@ -440,7 +441,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
         val now = System.currentTimeMillis()
         if (!force && now - lastSubscriptionRefreshAt < config.subscriptionRefreshIntervalMs) return
 
-        subscriptions = SubscribeRepository.findActivePublishersWithSubscribersByPlatform(platformId)
+        subscriptions = SubscriptionRepository.findActivePublishersWithSubscribersBySourcePlatform(platformId)
         lastSubscriptionRefreshAt = now
         logger.info {
             "pluginId=$pluginId action=refresh_subscription publisherSize=${subscriptions.size}"
