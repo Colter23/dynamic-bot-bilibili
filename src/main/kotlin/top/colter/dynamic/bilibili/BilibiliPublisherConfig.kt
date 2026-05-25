@@ -7,5 +7,6 @@ public data class BilibiliPublisherConfig(
     val requestIntervalMs: Long = 500,
     val replayWindowHours: Int = 0,
     val followGroupName: String = "",
+    val shortUrlResolveTimeoutMs: Long = 3_000,
     val cookiesJson: String = "",
 )

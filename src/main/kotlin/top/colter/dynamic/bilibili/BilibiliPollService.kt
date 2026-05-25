@@ -1,8 +1,12 @@
 package top.colter.dynamic.bilibili
 
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import top.colter.bilibili.api.follow
 import top.colter.bilibili.api.getCurrentUserNav
+import top.colter.bilibili.api.getDynamicDetail
 import top.colter.bilibili.api.getNewDynamic
 import top.colter.bilibili.api.getGroupList
 import top.colter.bilibili.api.getUserInfo
@@ -13,6 +17,7 @@ import top.colter.bilibili.auth.qrCode
 import top.colter.bilibili.client.BiliAuthClient
 import top.colter.bilibili.client.BiliClient
 import top.colter.bilibili.data.EditCookie
+import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.BiliDynamicList
 import top.colter.bilibili.data.login.QrCodeLoginData
 import top.colter.bilibili.data.login.QrCodeLoginResult
@@ -28,6 +33,8 @@ import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import kotlinx.coroutines.CancellationException
+import java.net.HttpURLConnection
+import java.net.URI
 
 internal data class BilibiliPublisherSnapshot(
     val userId: String,
@@ -41,6 +48,14 @@ internal data class BilibiliPublisherSnapshot(
 internal interface BilibiliPlatformGateway {
     suspend fun fetchNewDynamicPage(page: Int = 1, type: String = "all"): BiliDynamicList {
         throw UnsupportedOperationException("dynamic page fetch is unsupported")
+    }
+
+    suspend fun fetchDynamicDetail(dynamicId: String): BiliDynamic? {
+        throw UnsupportedOperationException("dynamic detail fetch is unsupported")
+    }
+
+    suspend fun expandShortUrl(url: String, timeoutMs: Long): String? {
+        throw UnsupportedOperationException("short URL expansion is unsupported")
     }
 
     suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot?
@@ -130,6 +145,22 @@ internal class BilibiliPollService(
         val list = client.getNewDynamic(page, type)
         applyRequestDelay()
         return list
+    }
+
+    override suspend fun fetchDynamicDetail(dynamicId: String): BiliDynamic? {
+        val id = dynamicId.toLongOrNull() ?: return null
+        val detail = client.getDynamicDetail(id)
+        applyRequestDelay()
+        return detail
+    }
+
+    override suspend fun expandShortUrl(url: String, timeoutMs: Long): String? {
+        val boundedTimeoutMs = timeoutMs.coerceAtLeast(1)
+        return withTimeoutOrNull(boundedTimeoutMs) {
+            withContext(Dispatchers.IO) {
+                expandRedirects(url, boundedTimeoutMs.toInt().coerceAtLeast(1))
+            }
+        }
     }
 
     override suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot? {
@@ -374,9 +405,40 @@ internal class BilibiliPollService(
             .toList()
     }
 
+    private fun expandRedirects(initialUrl: String, timeoutMs: Int): String? {
+        var current = initialUrl
+        repeat(MAX_SHORT_URL_REDIRECTS) {
+            val uri = runCatching { URI(current) }.getOrNull() ?: return null
+            val connection = runCatching { uri.toURL().openConnection() as? HttpURLConnection }
+                .getOrNull()
+                ?: return null
+            try {
+                connection.instanceFollowRedirects = false
+                connection.requestMethod = "GET"
+                connection.connectTimeout = timeoutMs
+                connection.readTimeout = timeoutMs
+                connection.setRequestProperty("User-Agent", USER_AGENT)
+
+                val statusCode = connection.responseCode
+                if (statusCode in HTTP_REDIRECT_RANGE) {
+                    val location = connection.getHeaderField("Location") ?: return null
+                    current = uri.resolve(location).toString()
+                    return@repeat
+                }
+                return current
+            } finally {
+                connection.disconnect()
+            }
+        }
+        return current
+    }
+
     private companion object {
         private const val DEFAULT_COOKIE_DOMAIN: String = ".bilibili.com"
         private const val DEFAULT_COOKIE_PATH: String = "/"
         private const val QR_EXPIRES_SECONDS: Long = 180
+        private const val MAX_SHORT_URL_REDIRECTS: Int = 5
+        private const val USER_AGENT: String = "dynamic-bot/0.0.3"
+        private val HTTP_REDIRECT_RANGE: IntRange = 300..399
     }
 }

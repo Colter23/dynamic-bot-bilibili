@@ -13,7 +13,7 @@ repositories {
 dependencies {
     implementation("top.colter.bilibili:bilibili-client:0.0.1")
 
-    implementation("top.colter.dynamic:dynamic-bot-core:0.0.2")
+    implementation("top.colter.dynamic:dynamic-bot-core:0.0.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
     implementation("io.github.oshai:kotlin-logging-jvm:7.0.0")
 

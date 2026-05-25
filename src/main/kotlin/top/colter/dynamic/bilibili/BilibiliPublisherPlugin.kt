@@ -18,6 +18,9 @@ import top.colter.dynamic.core.data.hasSeen
 import top.colter.dynamic.core.data.replayLowerBoundAtEpochSeconds
 import top.colter.dynamic.core.event.DynamicEvent
 import top.colter.dynamic.core.event.broadcast
+import top.colter.dynamic.core.link.DynamicLinkResolution
+import top.colter.dynamic.core.link.DynamicLinkResolver
+import top.colter.dynamic.core.link.ParsedDynamicLink
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
@@ -31,9 +34,10 @@ import top.colter.dynamic.core.task.TaskDefinition
 import top.colter.dynamic.core.task.TaskSchedule
 import top.colter.dynamic.core.task.TaskScheduler
 import top.colter.dynamic.core.tools.logger
+import java.net.URI
 import kotlin.time.Duration.Companion.milliseconds
 
-public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
+public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkResolver {
     private val pluginId: String = "bilibili-publisher"
     private val detectTaskId: String = "bilibili-detect"
 
@@ -157,6 +161,54 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
             addPublisherToFollowGroup(userId)
         }
         return result
+    }
+
+    override suspend fun parseDynamicLink(inputUrl: String): ParsedDynamicLink? {
+        val normalizedInput = inputUrl.trim().trimUrlPunctuation()
+        if (normalizedInput.isBlank()) return null
+
+        parseDirectDynamicLink(normalizedInput)?.let { return it }
+        if (!isBilibiliShortUrl(normalizedInput)) return null
+
+        val expanded = runCatching {
+            pollService.expandShortUrl(normalizedInput, config.shortUrlResolveTimeoutMs)
+        }.onFailure {
+            logger.warn(it) {
+                "pluginId=$pluginId action=expand_short_url result=failed url=$normalizedInput"
+            }
+        }.getOrNull() ?: return null
+
+        return parseDirectDynamicLink(expanded)?.copy(sourceUrl = normalizedInput)
+    }
+
+    override suspend fun resolveDynamicLink(parsedLink: ParsedDynamicLink): DynamicLinkResolution {
+        if (!parsedLink.platformId.equals(platformId, ignoreCase = true)) {
+            return DynamicLinkResolution.Failed(
+                parsedLink = parsedLink,
+                reason = "unsupported platform: ${parsedLink.platformId}",
+            )
+        }
+
+        val source = runCatching { pollService.fetchDynamicDetail(parsedLink.dynamicId) }
+            .getOrElse { error ->
+                return DynamicLinkResolution.Failed(
+                    parsedLink = parsedLink,
+                    reason = error.message ?: "failed to fetch Bilibili dynamic detail",
+                    cause = error,
+                )
+            }
+            ?: return DynamicLinkResolution.Failed(
+                parsedLink = parsedLink,
+                reason = "Bilibili dynamic not found: ${parsedLink.dynamicId}",
+            )
+
+        val dynamic = mapper.map(source, fallbackPublisher())
+            ?: return DynamicLinkResolution.Failed(
+                parsedLink = parsedLink,
+                reason = "failed to map Bilibili dynamic: ${parsedLink.dynamicId}",
+            )
+
+        return DynamicLinkResolution.Success(parsedLink, dynamic)
     }
 
     override suspend fun loginByCookie(cookie: String): PublisherLoginResult {
@@ -475,6 +527,87 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
         return started
     }
 
+    private fun parseDirectDynamicLink(inputUrl: String): ParsedDynamicLink? {
+        val uri = runCatching { URI(inputUrl) }.getOrNull() ?: return null
+        val scheme = uri.scheme?.lowercase() ?: return null
+        if (scheme != "http" && scheme != "https") return null
+
+        val host = uri.host?.lowercase() ?: return null
+        val pathSegments = uri.path
+            ?.split("/")
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
+
+        val dynamicId = when (host) {
+            "t.bilibili.com" -> pathSegments.firstOrNull()
+            "www.bilibili.com",
+            "m.bilibili.com" -> when (pathSegments.firstOrNull()) {
+                "opus" -> pathSegments.getOrNull(1)
+                "dynamic" -> pathSegments.getOrNull(1)
+                else -> null
+            }
+            else -> null
+        }?.takeIf { it.all { char -> char.isDigit() } }
+            ?: return null
+
+        return ParsedDynamicLink(
+            platformId = platformId,
+            dynamicId = dynamicId,
+            normalizedUrl = dynamicLink(dynamicId),
+            sourceUrl = inputUrl,
+        )
+    }
+
+    private fun isBilibiliShortUrl(inputUrl: String): Boolean {
+        val uri = runCatching { URI(inputUrl) }.getOrNull() ?: return false
+        val scheme = uri.scheme?.lowercase() ?: return false
+        if (scheme != "http" && scheme != "https") return false
+
+        val host = uri.host?.lowercase() ?: return false
+        return host == "b23.tv" || host.endsWith(".b23.tv")
+    }
+
+    private fun String.trimUrlPunctuation(): String {
+        return trim().trimEnd(
+            '.',
+            ',',
+            ';',
+            ':',
+            '!',
+            '?',
+            ')',
+            ']',
+            '}',
+            '>',
+            '。',
+            '，',
+            '；',
+            '：',
+            '！',
+            '？',
+            '）',
+            '】',
+            '》',
+        )
+    }
+
+    private fun dynamicLink(dynamicId: String): String {
+        return "$BILIBILI_DYNAMIC_HOME/$dynamicId"
+    }
+
+    private fun fallbackPublisher(): Publisher {
+        return Publisher(
+            id = 0,
+            platformId = platformId,
+            type = PublisherType.USER,
+            externalId = "",
+            name = "",
+            face = LazyImage(""),
+            createTime = 0,
+            createUser = 0,
+        )
+    }
+
     private data class ReplayTarget(
         val publisher: Publisher,
         val userId: Long,
@@ -482,4 +615,8 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin {
         val cursor: PublisherCursor,
         val lowerBound: Long,
     )
+
+    private companion object {
+        private const val BILIBILI_DYNAMIC_HOME: String = "https://t.bilibili.com"
+    }
 }

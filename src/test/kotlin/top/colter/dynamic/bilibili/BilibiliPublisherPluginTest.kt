@@ -21,6 +21,7 @@ import top.colter.dynamic.core.data.SubscriberType
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
+import top.colter.dynamic.core.link.DynamicLinkResolution
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
@@ -34,6 +35,8 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class BilibiliPublisherPluginTest {
@@ -92,6 +95,82 @@ class BilibiliPublisherPluginTest {
 
         assertEquals(FollowActionStatus.FAILED, result.status)
         assertEquals("follow failed", result.message)
+    }
+
+    @Test
+    fun `parseDynamicLink should support Bilibili direct dynamic links`() = runBlocking {
+        val plugin = testPlugin(defaultGateway())
+        plugin.init()
+
+        val parsed = plugin.parseDynamicLink("https://t.bilibili.com/1205230877720707077?spm_id_from=demo")
+
+        requireNotNull(parsed)
+        assertEquals("bilibili", parsed.platformId)
+        assertEquals("1205230877720707077", parsed.dynamicId)
+        assertEquals("https://t.bilibili.com/1205230877720707077", parsed.normalizedUrl)
+    }
+
+    @Test
+    fun `parseDynamicLink should support Bilibili opus and mobile dynamic links`() = runBlocking {
+        val plugin = testPlugin(defaultGateway())
+        plugin.init()
+
+        val opus = plugin.parseDynamicLink("https://www.bilibili.com/opus/774783779415785528")
+        val mobileOpus = plugin.parseDynamicLink("https://m.bilibili.com/opus/774783779415785529")
+        val mobileDynamic = plugin.parseDynamicLink("https://m.bilibili.com/dynamic/774783779415785530")
+
+        assertEquals("774783779415785528", opus?.dynamicId)
+        assertEquals("774783779415785529", mobileOpus?.dynamicId)
+        assertEquals("774783779415785530", mobileDynamic?.dynamicId)
+    }
+
+    @Test
+    fun `parseDynamicLink should expand Bilibili short links`() = runBlocking {
+        val shortUrl = "https://b23.tv/demo"
+        val gateway = defaultGateway(
+            shortUrlExpansions = mapOf(shortUrl to "https://www.bilibili.com/opus/774783779415785528?share_source=copy_link"),
+        )
+        val plugin = testPlugin(gateway, config = testConfig(shortUrlResolveTimeoutMs = 10))
+        plugin.init()
+
+        val parsed = plugin.parseDynamicLink(shortUrl)
+
+        requireNotNull(parsed)
+        assertEquals("774783779415785528", parsed.dynamicId)
+        assertEquals("https://t.bilibili.com/774783779415785528", parsed.normalizedUrl)
+        assertEquals(shortUrl, parsed.sourceUrl)
+        assertEquals(listOf(shortUrl), gateway.expandedShortUrls)
+    }
+
+    @Test
+    fun `parseDynamicLink should ignore unsupported links`() = runBlocking {
+        val plugin = testPlugin(defaultGateway())
+        plugin.init()
+
+        assertNull(plugin.parseDynamicLink("https://www.bilibili.com/video/BV123"))
+        assertNull(plugin.parseDynamicLink("https://example.com/opus/774783779415785528"))
+    }
+
+    @Test
+    fun `resolveDynamicLink should fetch detail and map dynamic`() = runBlocking {
+        val detail = buildDynamic(
+            epochSeconds = BILI_DYNAMIC_EPOCH_BASE + 123,
+            mid = 42,
+            name = "demo-up",
+            suffix = 1,
+        )
+        val gateway = defaultGateway(dynamicDetails = mapOf(detail.id.toString() to detail))
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val parsed = plugin.parseDynamicLink("https://t.bilibili.com/${detail.id}")!!
+        val resolution = plugin.resolveDynamicLink(parsed)
+
+        assertIs<DynamicLinkResolution.Success>(resolution)
+        assertEquals(detail.id.toString(), resolution.dynamic.dynamicId)
+        assertEquals("42", resolution.dynamic.publisher.externalId)
+        assertEquals("demo-up", resolution.dynamic.publisher.name)
+        assertEquals(listOf(detail.id.toString()), gateway.requestedDetails)
     }
 
     @Test
@@ -471,6 +550,7 @@ class BilibiliPublisherPluginTest {
         pollingIntervalMs: Long = 30_000,
         subscriptionRefreshIntervalMs: Long = 300_000,
         requestIntervalMs: Long = 0,
+        shortUrlResolveTimeoutMs: Long = 3_000,
     ): BilibiliPublisherConfig {
         return BilibiliPublisherConfig(
             pollingIntervalMs = pollingIntervalMs,
@@ -479,6 +559,20 @@ class BilibiliPublisherPluginTest {
             requestIntervalMs = requestIntervalMs,
             replayWindowHours = replayWindowHours,
             followGroupName = followGroupName,
+            shortUrlResolveTimeoutMs = shortUrlResolveTimeoutMs,
+        )
+    }
+
+    private fun defaultGateway(
+        dynamicDetails: Map<String, BiliDynamic> = emptyMap(),
+        shortUrlExpansions: Map<String, String?> = emptyMap(),
+    ): FakeGateway {
+        return FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            dynamicDetails = dynamicDetails,
+            shortUrlExpansions = shortUrlExpansions,
         )
     }
 
@@ -554,6 +648,8 @@ class BilibiliPublisherPluginTest {
             "qr login success",
         ),
         private val exportedCookiesJson: String = "",
+        private val dynamicDetails: Map<String, BiliDynamic> = emptyMap(),
+        private val shortUrlExpansions: Map<String, String?> = emptyMap(),
         initialDynamicPages: Map<Int, BiliDynamicList> = emptyMap(),
         initialGroups: List<BiliGroup> = emptyList(),
     ) : BilibiliPlatformGateway {
@@ -566,6 +662,8 @@ class BilibiliPublisherPluginTest {
             private set
         val createdGroupNames: MutableList<String> = mutableListOf()
         val addedGroupUsers: MutableList<GroupUsersCall> = mutableListOf()
+        val requestedDetails: MutableList<String> = mutableListOf()
+        val expandedShortUrls: MutableList<String> = mutableListOf()
 
         override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
             requestedPages.add(page)
@@ -581,6 +679,16 @@ class BilibiliPublisherPluginTest {
         fun setDynamicPages(pages: Map<Int, BiliDynamicList>) {
             dynamicPages.clear()
             dynamicPages.putAll(pages)
+        }
+
+        override suspend fun fetchDynamicDetail(dynamicId: String): BiliDynamic? {
+            requestedDetails.add(dynamicId)
+            return dynamicDetails[dynamicId]
+        }
+
+        override suspend fun expandShortUrl(url: String, timeoutMs: Long): String? {
+            expandedShortUrls.add(url)
+            return shortUrlExpansions[url]
         }
 
         override suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot? = snapshot
