@@ -4,6 +4,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import top.colter.bilibili.data.dynamic.BiliDynamic
+import top.colter.dynamic.core.config.ConfigApplyResult
+import top.colter.dynamic.core.config.ConfigurablePlugin
 import top.colter.dynamic.core.config.DefaultConfigService
 import top.colter.dynamic.core.config.loadOrCreate
 import top.colter.dynamic.core.config.save
@@ -38,11 +40,17 @@ import top.colter.dynamic.core.tools.logger
 import java.net.URI
 import kotlin.time.Duration.Companion.milliseconds
 
-public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkResolver {
+public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkResolver, ConfigurablePlugin<BilibiliPublisherConfig> {
     private val pluginId: String = "bilibili-publisher"
     private val detectTaskId: String = "bilibili-detect"
 
     override val platformId: String = "bilibili"
+
+    override val configId: String = pluginId
+    override val configName: String = "Bilibili 动态源"
+    override val configDescription: String = "Bilibili 轮询与登录配置。"
+    override val configClass = BilibiliPublisherConfig::class
+    override val configFormSpec = BilibiliPublisherConfigForm.spec
 
     private var loadConfig: (String) -> BilibiliPublisherConfig = { pluginId ->
         DefaultConfigService.loadOrCreate(pluginId) { BilibiliPublisherConfig() }
@@ -137,6 +145,44 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
 
     override fun cleanup() {
         logger.info { "pluginId=$pluginId action=cleanup" }
+    }
+
+    override fun currentConfig(): BilibiliPublisherConfig {
+        return if (::config.isInitialized) config else loadConfig(pluginId)
+    }
+
+    override fun applyConfig(next: BilibiliPublisherConfig): ConfigApplyResult {
+        BilibiliPublisherConfigForm.validate(next)
+        val previous = currentConfig()
+        val changed = previous != next
+        if (!changed) {
+            return ConfigApplyResult(changed = false, message = "Bilibili 配置未变化")
+        }
+
+        config = next
+        if (previous.followGroupName != next.followGroupName) {
+            followGroupId = null
+        }
+
+        val restartTargets = if (
+            previous.pollingIntervalMs != next.pollingIntervalMs ||
+            previous.requestIntervalMs != next.requestIntervalMs ||
+            previous.cookiesJson != next.cookiesJson
+        ) {
+            listOf("Bilibili 插件")
+        } else {
+            emptyList()
+        }
+        return ConfigApplyResult(
+            changed = true,
+            restartRequired = restartTargets.isNotEmpty(),
+            restartTargets = restartTargets,
+            message = if (restartTargets.isEmpty()) {
+                "Bilibili 配置已保存并生效"
+            } else {
+                "Bilibili 配置已保存；需要重启 Bilibili 插件以重建轮询服务"
+            },
+        )
     }
 
     override suspend fun fetchPublisherProfile(userId: String): PublisherProfile? {
