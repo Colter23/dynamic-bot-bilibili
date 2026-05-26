@@ -22,6 +22,7 @@ import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
 import top.colter.dynamic.core.link.DynamicLinkResolution
+import top.colter.dynamic.core.plugin.PublisherLoginAccount
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
@@ -391,6 +392,29 @@ class BilibiliPublisherPluginTest {
         assertEquals("""[{"name":"SESSDATA","value":"demo"}]""", savedConfig?.cookiesJson)
 
         plugin.stop()
+    }
+
+    @Test
+    fun `checkLoginState should delegate to gateway`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(
+                PublisherLoginStatus.SUCCESS,
+                "logged in",
+                PublisherLoginAccount(userId = "123", name = "demo-up"),
+            ),
+        )
+        val plugin = testPlugin(gateway)
+
+        plugin.init()
+        val result = plugin.checkLoginState()
+
+        assertEquals(PublisherLoginStatus.SUCCESS, result.status)
+        assertEquals("logged in", result.message)
+        assertEquals("123", result.account?.userId)
+        assertEquals("demo-up", result.account?.name)
     }
 
     @Test

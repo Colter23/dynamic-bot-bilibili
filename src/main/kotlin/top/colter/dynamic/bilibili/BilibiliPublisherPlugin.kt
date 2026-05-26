@@ -163,6 +163,10 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         return result
     }
 
+    override suspend fun checkLoginState(): PublisherLoginResult {
+        return pollService.checkLoginState()
+    }
+
     override suspend fun parseDynamicLink(inputUrl: String): ParsedDynamicLink? {
         val normalizedInput = inputUrl.trim().trimUrlPunctuation()
         if (normalizedInput.isBlank()) return null
