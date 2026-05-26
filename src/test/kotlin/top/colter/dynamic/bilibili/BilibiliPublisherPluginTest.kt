@@ -1,6 +1,9 @@
 package top.colter.dynamic.bilibili
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import top.colter.bilibili.data.LazyImage as BiliLazyImage
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.BiliDynamicList
@@ -18,10 +21,16 @@ import top.colter.dynamic.core.data.LazyImage as CoreLazyImage
 import top.colter.dynamic.core.data.PublisherCursor
 import top.colter.dynamic.core.data.PublisherProfile
 import top.colter.dynamic.core.data.SubscriberType
+import top.colter.dynamic.core.event.DynamicEvent
+import top.colter.dynamic.core.event.EventManger
+import top.colter.dynamic.core.event.Listener
+import top.colter.dynamic.core.event.SubscriptionChangedEvent
+import top.colter.dynamic.core.event.SubscriptionChangeType
+import top.colter.dynamic.core.event.register
+import top.colter.dynamic.core.link.DynamicLinkResolution
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
-import top.colter.dynamic.core.link.DynamicLinkResolution
 import top.colter.dynamic.core.plugin.PublisherLoginAccount
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
@@ -33,6 +42,7 @@ import top.colter.dynamic.core.repository.SubscriptionRepository
 import top.colter.dynamic.core.task.TaskScheduler
 import top.colter.dynamic.core.task.TaskStatus
 import kotlin.io.path.createTempDirectory
+import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -41,6 +51,11 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class BilibiliPublisherPluginTest {
+
+    @AfterTest
+    fun cleanup() {
+        EventManger.shutdown()
+    }
 
     @Test
     fun `fetchPublisherProfile should map gateway snapshot to publisher profile`() = runBlocking {
@@ -476,6 +491,73 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `subscription event should add publisher baseline and trigger immediate detect`() = runBlocking {
+        val scheduler = TaskScheduler()
+        val cursorStore = InMemoryCursorStore()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(),
+            taskScheduler = scheduler,
+            cursorStore = cursorStore,
+        )
+
+        plugin.init()
+        plugin.start()
+        withTimeout(3_000) {
+            while ((scheduler.snapshot("bilibili-detect")?.runCount ?: 0L) == 0L) {
+                delay(10)
+            }
+        }
+
+        val seeded = seedPublisherAndSubscriber()
+        val subscription = SubscriptionRepository.findBySubscriberAndPublisher(
+            seeded.subscriber.id,
+            seeded.publisher.id,
+        )!!
+        val rawDynamic = buildDynamic(
+            epochSeconds = subscription.createdAtEpochSeconds + 1,
+            mid = seeded.publisher.externalId.toLong(),
+            name = seeded.publisher.name,
+            suffix = 42,
+        )
+        gateway.setDynamicPages(mapOf(1 to dynamicPage(false, rawDynamic)))
+
+        val received = CompletableDeferred<DynamicEvent>()
+        object : Listener<DynamicEvent> {
+            override suspend fun onMessage(event: DynamicEvent) {
+                if (!received.isCompleted) received.complete(event)
+            }
+        }.register<DynamicEvent>()
+
+        plugin.onSubscriptionChanged(
+            SubscriptionChangedEvent(
+                changeType = SubscriptionChangeType.SUBSCRIBED,
+                subscription = subscription,
+                publisher = seeded.publisher,
+                subscriber = seeded.subscriber,
+                changedAtEpochSeconds = subscription.createdAtEpochSeconds,
+            )
+        )
+
+        val dynamicEvent = withTimeout(3_000) { received.await() }
+        assertNull(dynamicEvent.target)
+        assertEquals(rawDynamic.id.toString(), dynamicEvent.dynamic.dynamicId)
+        assertEquals(listOf(1), gateway.requestedPages)
+        assertEquals(
+            rawDynamic.id.toString(),
+            cursorStore.markedDynamicIds(seeded.publisher.id.toString()).last(),
+        )
+
+        plugin.stop()
+    }
+
+    @Test
     fun `poll service checkLoginState should map BiliLoginException to failed result`() = runBlocking {
         val service = BilibiliPollService(
             requestIntervalMs = 0,
@@ -572,13 +654,11 @@ class BilibiliPublisherPluginTest {
         followGroupName: String = "",
         fetchLimit: Int = 5,
         pollingIntervalMs: Long = 30_000,
-        subscriptionRefreshIntervalMs: Long = 300_000,
         requestIntervalMs: Long = 0,
         shortUrlResolveTimeoutMs: Long = 3_000,
     ): BilibiliPublisherConfig {
         return BilibiliPublisherConfig(
             pollingIntervalMs = pollingIntervalMs,
-            subscriptionRefreshIntervalMs = subscriptionRefreshIntervalMs,
             fetchLimit = fetchLimit,
             requestIntervalMs = requestIntervalMs,
             replayWindowHours = replayWindowHours,
@@ -784,6 +864,11 @@ class BilibiliPublisherPluginTest {
         private val marks: MutableList<CursorMark> = mutableListOf()
 
         override fun get(publisherId: String): PublisherCursor? = states[publisherId]
+
+        override fun ensureBaseline(publisherId: String, timestamp: Long): PublisherCursor {
+            states[publisherId]?.let { return it }
+            return markSeen(publisherId, "__baseline__$timestamp", timestamp)
+        }
 
         override fun markSeen(publisherId: String, dynamicId: String, timestamp: Long): PublisherCursor {
             val previous = states[publisherId]

@@ -13,10 +13,11 @@ import top.colter.dynamic.core.data.Publisher
 import top.colter.dynamic.core.data.PublisherCursor
 import top.colter.dynamic.core.data.PublisherProfile
 import top.colter.dynamic.core.data.PublisherType
-import top.colter.dynamic.core.data.Subscriber
 import top.colter.dynamic.core.data.hasSeen
 import top.colter.dynamic.core.data.replayLowerBoundAtEpochSeconds
 import top.colter.dynamic.core.event.DynamicEvent
+import top.colter.dynamic.core.event.SubscriptionChangedEvent
+import top.colter.dynamic.core.event.SubscriptionChangeType
 import top.colter.dynamic.core.event.broadcast
 import top.colter.dynamic.core.link.DynamicLinkResolution
 import top.colter.dynamic.core.link.DynamicLinkResolver
@@ -56,6 +57,8 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     private var taskScheduler: TaskScheduler = TaskScheduler()
 
     private val followGroupMutex: Mutex = Mutex()
+    private val detectMutex: Mutex = Mutex()
+    private val publisherLock: Any = Any()
 
     private lateinit var config: BilibiliPublisherConfig
     private lateinit var pollService: BilibiliPlatformGateway
@@ -64,13 +67,13 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     private lateinit var detectTask: TaskDefinition
 
     @Volatile
-    private var subscriptions: Map<Publisher, List<Subscriber>> = emptyMap()
-
-    @Volatile
-    private var lastSubscriptionRefreshAt: Long = 0
+    private var publishers: Map<Int, Publisher> = emptyMap()
 
     @Volatile
     private var followGroupId: Long? = null
+
+    @Volatile
+    private var pendingDetection: Boolean = false
 
     internal constructor(
         loadConfig: (String) -> BilibiliPublisherConfig,
@@ -105,7 +108,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         )
 
         importStoredCookies()
-        refreshSubscriptions(force = true)
+        loadActivePublishers()
         logger.info {
             "pluginId=$pluginId action=init configPath=${DefaultConfigService.resolvePath(pluginId).toAbsolutePath()}"
         }
@@ -165,6 +168,15 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
 
     override suspend fun checkLoginState(): PublisherLoginResult {
         return pollService.checkLoginState()
+    }
+
+    override suspend fun onSubscriptionChanged(event: SubscriptionChangedEvent) {
+        if (!event.publisher.platformId.equals(platformId, ignoreCase = true)) return
+
+        when (event.changeType) {
+            SubscriptionChangeType.SUBSCRIBED -> handleSubscribed(event)
+            SubscriptionChangeType.UNSUBSCRIBED -> handleUnsubscribed(event)
+        }
     }
 
     override suspend fun parseDynamicLink(inputUrl: String): ParsedDynamicLink? {
@@ -237,8 +249,24 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     }
 
     private suspend fun detectAndPublish() {
-        refreshSubscriptions(force = false)
-        if (subscriptions.isEmpty()) return
+        if (!detectMutex.tryLock()) {
+            pendingDetection = true
+            return
+        }
+
+        try {
+            do {
+                pendingDetection = false
+                detectAndPublishLocked()
+            } while (pendingDetection)
+        } finally {
+            detectMutex.unlock()
+        }
+    }
+
+    private suspend fun detectAndPublishLocked() {
+        val publisherSnapshot = publishers
+        if (publisherSnapshot.isEmpty()) return
 
         val start = System.currentTimeMillis()
         val followedDynamics = runCatching { pollService.fetchNewDynamicPage(1).items.take(config.fetchLimit.coerceAtLeast(0)) }
@@ -255,7 +283,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                 dynamics.sortedWith(compareByDescending<BiliDynamic> { it.time }.thenByDescending { it.id })
             }
 
-        subscriptions.forEach publisherLoop@{ (publisher, subscribers) ->
+        publisherSnapshot.values.forEach publisherLoop@{ publisher ->
             val publisherId = publisher.id.toString()
             val uid = publisher.externalId.toLongOrNull() ?: return@publisherLoop
             val publisherDynamics = dynamicsByPublisher[uid].orEmpty()
@@ -276,21 +304,19 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                 .asReversed()
                 .forEach dynamicLoop@{ raw ->
                     val dynamicId = raw.id.toString()
-                    if (cursor.hasSeen(dynamicId)) {
+                    if (raw.time <= cursor.lastSeenAt || cursor.hasSeen(dynamicId)) {
                         return@dynamicLoop
                     }
 
                     val dynamic = mapper.map(raw, publisher) ?: return@dynamicLoop
-                    subscribers.forEach { subscriber ->
-                        DynamicEvent(source = pluginId, target = subscriber, dynamic = dynamic).broadcast()
-                    }
+                    DynamicEvent(source = pluginId, dynamic = dynamic).broadcast()
                     cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
                 }
         }
     }
 
     private suspend fun bootstrapLoggedInState(allowReplay: Boolean): Boolean {
-        refreshSubscriptions(force = true)
+        loadActivePublishers()
         runCatching { ensureFollowGroupInitialized() }
             .onFailure {
                 logger.warn(it) {
@@ -316,7 +342,8 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     }
 
     private suspend fun warmUpExistingCursors() {
-        if (subscriptions.isEmpty()) return
+        val publisherSnapshot = publishers
+        if (publisherSnapshot.isEmpty()) return
 
         val followedDynamics = runCatching { pollService.fetchNewDynamicPage(1).items.take(config.fetchLimit.coerceAtLeast(0)) }
             .onFailure {
@@ -333,7 +360,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                 dynamics.sortedWith(compareByDescending<BiliDynamic> { it.time }.thenByDescending { it.id })
             }
 
-        subscriptions.forEach publisherLoop@{ (publisher, _) ->
+        publisherSnapshot.values.forEach publisherLoop@{ publisher ->
             val publisherId = publisher.id.toString()
             val uid = publisher.externalId.toLongOrNull() ?: return@publisherLoop
             if (cursorStore.get(publisherId) == null) return@publisherLoop
@@ -346,7 +373,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                 .asReversed()
                 .forEach dynamicLoop@{ raw ->
                     val dynamicId = raw.id.toString()
-                    if (cursor.hasSeen(dynamicId)) {
+                    if (raw.time <= cursor.lastSeenAt || cursor.hasSeen(dynamicId)) {
                         return@dynamicLoop
                     }
                     cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
@@ -356,17 +383,17 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
 
     private suspend fun replayMissingDynamics() {
         if (config.replayWindowHours <= 0) return
-        if (subscriptions.isEmpty()) return
+        val publisherSnapshot = publishers
+        if (publisherSnapshot.isEmpty()) return
 
         val nowEpochSeconds = System.currentTimeMillis() / 1000
-        val targets = subscriptions.mapNotNull { (publisher, subscribers) ->
+        val targets = publisherSnapshot.values.mapNotNull { publisher ->
             val userId = publisher.externalId.toLongOrNull() ?: return@mapNotNull null
             val cursor = cursorStore.get(publisher.id.toString()) ?: return@mapNotNull null
             val lowerBound = cursor.replayLowerBoundAtEpochSeconds(config.replayWindowHours, nowEpochSeconds) ?: return@mapNotNull null
             ReplayTarget(
                 publisher = publisher,
                 userId = userId,
-                subscribers = subscribers,
                 cursor = cursor,
                 lowerBound = lowerBound,
             )
@@ -404,12 +431,10 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             dynamicsByPublisher[target.userId].orEmpty().forEach dynamicLoop@{ raw ->
                 if (raw.time < target.lowerBound) return@dynamicLoop
                 val dynamicId = raw.id.toString()
-                if (cursor.hasSeen(dynamicId)) return@dynamicLoop
+                if (raw.time <= cursor.lastSeenAt || cursor.hasSeen(dynamicId)) return@dynamicLoop
 
                 val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
-                target.subscribers.forEach { subscriber ->
-                    DynamicEvent(source = pluginId, target = subscriber, dynamic = dynamic).broadcast()
-                }
+                DynamicEvent(source = pluginId, dynamic = dynamic).broadcast()
                 cursor = cursorStore.markSeen(target.publisher.id.toString(), dynamicId, raw.time)
             }
         }
@@ -493,14 +518,51 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         return config.followGroupName.trim().takeIf { it.isNotBlank() }
     }
 
-    private fun refreshSubscriptions(force: Boolean) {
-        val now = System.currentTimeMillis()
-        if (!force && now - lastSubscriptionRefreshAt < config.subscriptionRefreshIntervalMs) return
+    private suspend fun handleSubscribed(event: SubscriptionChangedEvent) {
+        val publisherId = event.publisher.id
+        val snapshot = SubscriptionRepository.findActivePublisherWithSubscribersById(publisherId)
+        if (snapshot == null || !snapshot.publisher.platformId.equals(platformId, ignoreCase = true)) {
+            synchronized(publisherLock) {
+                publishers = publishers - publisherId
+            }
+            return
+        }
 
-        subscriptions = SubscriptionRepository.findActivePublishersWithSubscribersBySourcePlatform(platformId)
-        lastSubscriptionRefreshAt = now
+        val becamePresent = synchronized(publisherLock) {
+            val wasPresent = publishers.containsKey(publisherId)
+            publishers = publishers + (snapshot.publisher.id to snapshot.publisher)
+            !wasPresent
+        }
+        if (becamePresent && cursorStore.get(publisherId.toString()) == null) {
+            cursorStore.ensureBaseline(publisherId.toString(), event.subscription.createdAtEpochSeconds)
+        }
+
+        if (taskScheduler.isRunning(detectTaskId)) {
+            detectAndPublish()
+        }
+    }
+
+    private fun handleUnsubscribed(event: SubscriptionChangedEvent) {
+        val publisherId = event.publisher.id
+        val snapshot = SubscriptionRepository.findActivePublisherWithSubscribersById(publisherId)
+        synchronized(publisherLock) {
+            publishers = if (snapshot == null || !snapshot.publisher.platformId.equals(platformId, ignoreCase = true)) {
+                publishers - publisherId
+            } else {
+                publishers + (snapshot.publisher.id to snapshot.publisher)
+            }
+        }
+    }
+
+    private fun loadActivePublishers() {
+        val loaded = SubscriptionRepository.findActivePublishersWithSubscribersBySourcePlatform(platformId)
+            .keys
+            .associateBy { it.id }
+        synchronized(publisherLock) {
+            publishers = loaded
+        }
         logger.info {
-            "pluginId=$pluginId action=refresh_subscription publisherSize=${subscriptions.size}"
+            "pluginId=$pluginId action=load_publishers publisherSize=${publishers.size}"
         }
     }
 
@@ -615,7 +677,6 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     private data class ReplayTarget(
         val publisher: Publisher,
         val userId: Long,
-        val subscribers: List<Subscriber>,
         val cursor: PublisherCursor,
         val lowerBound: Long,
     )
