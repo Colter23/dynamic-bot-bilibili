@@ -36,9 +36,11 @@ import top.colter.dynamic.core.repository.SubscriptionRepository
 import top.colter.dynamic.core.task.TaskDefinition
 import top.colter.dynamic.core.task.TaskSchedule
 import top.colter.dynamic.core.task.TaskScheduler
-import top.colter.dynamic.core.tools.logger
+import top.colter.dynamic.core.tools.loggerFor
 import java.net.URI
 import kotlin.time.Duration.Companion.milliseconds
+
+private val logger = loggerFor<BilibiliPublisherPlugin>()
 
 public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkResolver, ConfigurablePlugin<BilibiliPublisherConfig> {
     private val pluginId: String = "bilibili-publisher"
