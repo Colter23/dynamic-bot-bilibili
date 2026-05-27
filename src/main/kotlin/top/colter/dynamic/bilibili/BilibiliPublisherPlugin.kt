@@ -120,7 +120,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         importStoredCookies()
         loadActivePublishers()
         logger.info {
-            "pluginId=$pluginId action=init configPath=${DefaultConfigService.resolvePath(pluginId).toAbsolutePath()}"
+            "Bilibili 配置已加载：path=${DefaultConfigService.resolvePath(pluginId).toAbsolutePath()}"
         }
     }
 
@@ -129,11 +129,11 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         if (loginResult.status == PublisherLoginStatus.SUCCESS) {
             val taskStarted = runBlocking { bootstrapLoggedInState(allowReplay = true) }
             logger.info {
-                "pluginId=$pluginId action=start result=started loginAccount=${loginResult.account?.name ?: loginResult.account?.userId ?: "unknown"} taskStarted=$taskStarted"
+                "Bilibili 轮询已就绪：账号=${loginResult.account?.name ?: loginResult.account?.userId ?: "未知"}，任务新启动=$taskStarted"
             }
         } else {
             logger.warn {
-                "pluginId=$pluginId action=start result=skipped reason=${loginResult.status.name.lowercase()} message=${loginResult.message}"
+                "Bilibili 轮询未启动：登录状态=${loginResult.status}，原因=${loginResult.message}"
             }
         }
     }
@@ -142,11 +142,10 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         runBlocking {
             taskScheduler.stop(detectTaskId)
         }
-        logger.info { "pluginId=$pluginId action=stop" }
+        logger.info { "Bilibili 轮询已停止" }
     }
 
     override fun cleanup() {
-        logger.info { "pluginId=$pluginId action=cleanup" }
     }
 
     override fun currentConfig(): BilibiliPublisherConfig {
@@ -238,7 +237,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             pollService.expandShortUrl(normalizedInput, config.shortUrlResolveTimeoutMs)
         }.onFailure {
             logger.warn(it) {
-                "pluginId=$pluginId action=expand_short_url result=failed url=$normalizedInput"
+                "Bilibili 短链解析失败：url=$normalizedInput"
             }
         }.getOrNull() ?: return null
 
@@ -249,7 +248,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         if (!parsedLink.platformId.equals(platformId, ignoreCase = true)) {
             return DynamicLinkResolution.Failed(
                 parsedLink = parsedLink,
-                reason = "unsupported platform: ${parsedLink.platformId}",
+                reason = "不支持的平台: ${parsedLink.platformId}",
             )
         }
 
@@ -257,19 +256,19 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             .getOrElse { error ->
                 return DynamicLinkResolution.Failed(
                     parsedLink = parsedLink,
-                    reason = error.message ?: "failed to fetch Bilibili dynamic detail",
+                    reason = error.message ?: "获取Bilibili动态详情失败",
                     cause = error,
                 )
             }
             ?: return DynamicLinkResolution.Failed(
                 parsedLink = parsedLink,
-                reason = "Bilibili dynamic not found: ${parsedLink.dynamicId}",
+                reason = "未找到Bilibili动态: ${parsedLink.dynamicId}",
             )
 
         val dynamic = mapper.map(source, fallbackPublisher())
             ?: return DynamicLinkResolution.Failed(
                 parsedLink = parsedLink,
-                reason = "failed to map Bilibili dynamic: ${parsedLink.dynamicId}",
+                reason = "Bilibili动态映射失败: ${parsedLink.dynamicId}",
             )
 
         return DynamicLinkResolution.Success(parsedLink, dynamic)
@@ -319,8 +318,8 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         val start = System.currentTimeMillis()
         val followedDynamics = runCatching { pollService.fetchNewDynamicPage(1).items.take(config.fetchLimit.coerceAtLeast(0)) }
             .onFailure {
-                logger.error(it) {
-                    "pluginId=$pluginId action=poll result=failed"
+                logger.warn(it) {
+                    "Bilibili 动态轮询失败"
                 }
             }
             .getOrElse { emptyList() }
@@ -341,8 +340,8 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             if (initialCursor == null) {
                 val latestDynamic = publisherDynamics.first()
                 cursorStore.markSeen(publisherId, latestDynamic.id.toString(), latestDynamic.time)
-                logger.info {
-                    "pluginId=$pluginId publisherId=$publisherId action=bootstrap result=initialized latencyMs=$latency"
+                logger.debug {
+                    "Bilibili 动态游标已初始化：publisherId=$publisherId，latencyMs=$latency"
                 }
                 return@publisherLoop
             }
@@ -368,21 +367,21 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         runCatching { ensureFollowGroupInitialized() }
             .onFailure {
                 logger.warn(it) {
-                    "pluginId=$pluginId action=follow_group_init result=failed"
+                    "Bilibili 关注分组初始化失败"
                 }
             }
         if (config.replayWindowHours > 0 && allowReplay) {
             runCatching { replayMissingDynamics() }
                 .onFailure {
                     logger.warn(it) {
-                        "pluginId=$pluginId action=replay result=failed"
+                        "Bilibili 历史动态补发失败"
                     }
                 }
         } else if (!taskScheduler.isRunning(detectTaskId)) {
             runCatching { warmUpExistingCursors() }
                 .onFailure {
                     logger.warn(it) {
-                        "pluginId=$pluginId action=bootstrap_warmup result=failed"
+                        "Bilibili 动态游标预热失败"
                     }
                 }
         }
@@ -395,8 +394,8 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
 
         val followedDynamics = runCatching { pollService.fetchNewDynamicPage(1).items.take(config.fetchLimit.coerceAtLeast(0)) }
             .onFailure {
-                logger.error(it) {
-                    "pluginId=$pluginId action=bootstrap_warmup_poll result=failed"
+                logger.warn(it) {
+                    "Bilibili 动态游标预热拉取失败"
                 }
             }
             .getOrElse { emptyList() }
@@ -499,7 +498,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             pollService.addUsersToFollowGroup(listOf(uid), listOf(groupId))
         }.onFailure {
             logger.warn(it) {
-                "pluginId=$pluginId action=follow_group_add result=failed userId=$userId groupId=$groupId"
+                "加入 Bilibili 关注分组失败：uid=$userId，groupId=$groupId"
             }
         }
     }
@@ -521,13 +520,13 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             pollService.fetchFollowGroups()
         }.onFailure {
             logger.warn(it) {
-                "pluginId=$pluginId action=follow_group_fetch result=failed groupName=$groupName"
+                "读取 Bilibili 关注分组失败：name=$groupName"
             }
         }.getOrNull() ?: return null
 
         existingGroups.firstOrNull { it.name == groupName }?.let { matched ->
-            logger.info {
-                "pluginId=$pluginId action=follow_group_resolve result=found groupName=$groupName groupId=${matched.tid}"
+            logger.debug {
+                "复用 Bilibili 关注分组：name=$groupName，groupId=${matched.tid}"
             }
             return matched.tid
         }
@@ -536,7 +535,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             pollService.createFollowGroup(groupName)
         }.onFailure {
             logger.warn(it) {
-                "pluginId=$pluginId action=follow_group_create result=failed groupName=$groupName"
+                "创建 Bilibili 关注分组失败：name=$groupName"
             }
         }
 
@@ -544,20 +543,20 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             pollService.fetchFollowGroups()
         }.onFailure {
             logger.warn(it) {
-                "pluginId=$pluginId action=follow_group_reload result=failed groupName=$groupName"
+                "重新读取 Bilibili 关注分组失败：name=$groupName"
             }
         }.getOrNull() ?: return null
 
         val createdGroup = refreshedGroups.firstOrNull { it.name == groupName }
         if (createdGroup == null) {
             logger.warn {
-                "pluginId=$pluginId action=follow_group_resolve result=missing groupName=$groupName"
+                "Bilibili 关注分组未找到：name=$groupName"
             }
             return null
         }
 
         logger.info {
-            "pluginId=$pluginId action=follow_group_resolve result=created groupName=$groupName groupId=${createdGroup.tid}"
+            "Bilibili 关注分组已创建：name=$groupName，groupId=${createdGroup.tid}"
         }
         return createdGroup.tid
     }
@@ -610,7 +609,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             publishers = loaded
         }
         logger.info {
-            "pluginId=$pluginId action=load_publishers publisherSize=${publishers.size}"
+            "Bilibili 订阅发布者已加载：数量=${publishers.size}"
         }
     }
 
@@ -621,7 +620,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                 pollService.importCookiesJson(config.cookiesJson)
             }
         }.onFailure {
-            logger.warn(it) { "pluginId=$pluginId action=import_stored_cookies result=failed" }
+            logger.warn(it) { "导入 Bilibili 登录信息失败" }
         }
     }
 
@@ -631,13 +630,17 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         runCatching {
             saveConfig(pluginId, config)
         }.onFailure {
-            logger.warn(it) { "pluginId=$pluginId action=save_config result=failed" }
+            logger.warn(it) { "保存 Bilibili 登录信息失败" }
         }
     }
 
     private fun startDetectionTask(): Boolean {
         val started = taskScheduler.start(detectTask)
-        logger.info { "pluginId=$pluginId action=start_detection_task started=$started" }
+        if (started) {
+            logger.info { "Bilibili 检测任务已启动：taskId=$detectTaskId" }
+        } else {
+            logger.debug { "Bilibili 检测任务已在运行：taskId=$detectTaskId" }
+        }
         return started
     }
 
