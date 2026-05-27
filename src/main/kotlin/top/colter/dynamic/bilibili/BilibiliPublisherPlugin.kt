@@ -11,13 +11,19 @@ import top.colter.dynamic.core.config.loadOrCreate
 import top.colter.dynamic.core.config.save
 import top.colter.dynamic.core.data.EntityState
 import top.colter.dynamic.core.data.LazyImage
+import top.colter.dynamic.core.data.LiveChange
+import top.colter.dynamic.core.data.LiveStatus
+import top.colter.dynamic.core.data.LiveStatusUpdate
+import top.colter.dynamic.core.data.PlatformDescriptor
+import top.colter.dynamic.core.data.PlatformKind
 import top.colter.dynamic.core.data.Publisher
 import top.colter.dynamic.core.data.PublisherCursor
+import top.colter.dynamic.core.data.PublisherLiveStatus
 import top.colter.dynamic.core.data.PublisherProfile
 import top.colter.dynamic.core.data.PublisherType
 import top.colter.dynamic.core.data.hasSeen
 import top.colter.dynamic.core.data.replayLowerBoundAtEpochSeconds
-import top.colter.dynamic.core.event.DynamicEvent
+import top.colter.dynamic.core.event.SourceUpdateEvent
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
 import top.colter.dynamic.core.event.SubscriptionChangeType
 import top.colter.dynamic.core.event.broadcast
@@ -61,6 +67,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         BilibiliPollService(requestIntervalMs)
     }
     private var cursorStoreFactory: () -> BilibiliCursorStore = { DatabaseBilibiliCursorStore() }
+    private var liveStatusStoreFactory: () -> BilibiliLiveStatusStore = { DatabaseBilibiliLiveStatusStore() }
     private var saveConfig: (String, BilibiliPublisherConfig) -> Unit = { id, config ->
         DefaultConfigService.save(id, config)
     }
@@ -74,6 +81,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     private lateinit var pollService: BilibiliPlatformGateway
     private lateinit var mapper: BilibiliDynamicMapper
     private lateinit var cursorStore: BilibiliCursorStore
+    private lateinit var liveStatusStore: BilibiliLiveStatusStore
     private lateinit var detectTask: TaskDefinition
 
     @Volatile
@@ -89,12 +97,14 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         loadConfig: (String) -> BilibiliPublisherConfig,
         serviceFactory: (Long) -> BilibiliPlatformGateway,
         cursorStoreFactory: () -> BilibiliCursorStore,
+        liveStatusStoreFactory: () -> BilibiliLiveStatusStore = { DatabaseBilibiliLiveStatusStore() },
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
         taskScheduler: TaskScheduler = TaskScheduler(),
     ) : this() {
         this.loadConfig = loadConfig
         this.serviceFactory = serviceFactory
         this.cursorStoreFactory = cursorStoreFactory
+        this.liveStatusStoreFactory = liveStatusStoreFactory
         this.saveConfig = saveConfig
         this.taskScheduler = taskScheduler
     }
@@ -109,6 +119,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         pollService = serviceFactory(config.requestIntervalMs)
         mapper = BilibiliDynamicMapper()
         cursorStore = cursorStoreFactory()
+        liveStatusStore = liveStatusStoreFactory()
         detectTask = TaskDefinition(
             id = detectTaskId,
             schedule = TaskSchedule.FixedDelay(config.pollingIntervalMs.milliseconds, runImmediately = true),
@@ -356,10 +367,11 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                     }
 
                     val dynamic = mapper.map(raw, publisher) ?: return@dynamicLoop
-                    DynamicEvent(source = pluginId, dynamic = dynamic).broadcast()
+                    SourceUpdateEvent(source = pluginId, update = dynamic).broadcast()
                     cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
                 }
         }
+        detectLiveStatusChanges(publisherSnapshot)
     }
 
     private suspend fun bootstrapLoggedInState(allowReplay: Boolean): Boolean {
@@ -385,6 +397,12 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                     }
                 }
         }
+        runCatching { warmUpLiveStatuses() }
+            .onFailure {
+                logger.warn(it) {
+                    "Bilibili 直播状态预热失败"
+                }
+            }
         return startDetectionTask()
     }
 
@@ -426,6 +444,148 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                     cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
                 }
         }
+    }
+
+    private suspend fun warmUpLiveStatuses() {
+        if (!config.liveDetectionEnabled) return
+        val publisherSnapshot = publishers
+        if (publisherSnapshot.isEmpty()) return
+
+        val now = System.currentTimeMillis() / 1000
+        val liveByUid = fetchLiveSnapshotsByUid(publisherSnapshot.values)
+        publisherSnapshot.values.forEach { publisher ->
+            val uid = publisher.externalId.toLongOrNull() ?: return@forEach
+            val previous = liveStatusStore.get(publisher.id.toString())
+            val current = buildLiveState(
+                publisher = publisher,
+                snapshot = liveByUid[uid],
+                previous = previous,
+                observedAt = now,
+            )
+            liveStatusStore.save(current)
+        }
+    }
+
+    private suspend fun detectLiveStatusChanges(publisherSnapshot: Map<Int, Publisher>) {
+        if (!config.liveDetectionEnabled || publisherSnapshot.isEmpty()) return
+
+        val now = System.currentTimeMillis() / 1000
+        val liveByUid = fetchLiveSnapshotsByUid(publisherSnapshot.values)
+        publisherSnapshot.values.forEach { publisher ->
+            val uid = publisher.externalId.toLongOrNull() ?: return@forEach
+            val previous = liveStatusStore.get(publisher.id.toString())
+            val current = buildLiveState(
+                publisher = publisher,
+                snapshot = liveByUid[uid],
+                previous = previous,
+                observedAt = now,
+            )
+            val update = buildLiveUpdate(publisher, previous, current, now)
+            liveStatusStore.save(current)
+            update?.let {
+                SourceUpdateEvent(source = pluginId, update = it).broadcast()
+            }
+        }
+    }
+
+    private suspend fun fetchLiveSnapshotsByUid(publishers: Collection<Publisher>): Map<Long, BilibiliLiveSnapshot> {
+        val uids = publishers
+            .mapNotNull { it.externalId.toLongOrNull() }
+            .distinct()
+        if (uids.isEmpty()) return emptyMap()
+
+        val batchSize = config.liveStatusBatchSize.coerceAtLeast(1)
+        val result = linkedMapOf<Long, BilibiliLiveSnapshot>()
+        uids.chunked(batchSize).forEach { batch ->
+            val snapshots = runCatching {
+                pollService.fetchLiveStatusBatch(batch)
+            }.onFailure {
+                logger.warn(it) {
+                    "Bilibili 直播状态拉取失败：uids=$batch"
+                }
+            }.getOrDefault(emptyList())
+            snapshots.forEach { snapshot ->
+                val uid = snapshot.userId.toLongOrNull() ?: return@forEach
+                result[uid] = snapshot
+            }
+        }
+        return result
+    }
+
+    private fun buildLiveState(
+        publisher: Publisher,
+        snapshot: BilibiliLiveSnapshot?,
+        previous: PublisherLiveStatus?,
+        observedAt: Long,
+    ): PublisherLiveStatus {
+        val status = snapshot?.status ?: LiveStatus.CLOSE
+        val roomId = snapshot?.roomId?.takeIf { it.isNotBlank() }
+            ?: previous?.roomId
+            ?: ""
+        val title = snapshot?.title?.takeIf { it.isNotBlank() }
+            ?: previous?.title
+            ?: publisher.name
+        val cover = snapshot?.coverUrl?.let(::LazyImage) ?: previous?.cover
+        val area = snapshot?.area?.takeIf { it.isNotBlank() } ?: previous?.area
+        val startedAt = if (status == LiveStatus.OPEN) {
+            snapshot?.startedAtEpochSeconds
+                ?: previous?.takeIf { it.status == LiveStatus.OPEN }?.startedAtEpochSeconds
+                ?: observedAt
+        } else {
+            previous?.startedAtEpochSeconds ?: snapshot?.startedAtEpochSeconds
+        }
+
+        return PublisherLiveStatus(
+            publisherId = publisher.id,
+            roomId = roomId,
+            status = status,
+            title = title,
+            cover = cover,
+            area = area,
+            startedAtEpochSeconds = startedAt,
+            lastObservedAtEpochSeconds = observedAt,
+        )
+    }
+
+    private fun buildLiveUpdate(
+        publisher: Publisher,
+        previous: PublisherLiveStatus?,
+        current: PublisherLiveStatus,
+        observedAt: Long,
+    ): LiveStatusUpdate? {
+        if (previous == null) return null
+
+        val previousOpen = previous.status == LiveStatus.OPEN
+        val currentOpen = current.status == LiveStatus.OPEN
+        if (previousOpen == currentOpen) return null
+
+        val change = if (currentOpen) LiveChange.STARTED else LiveChange.ENDED
+        val startedAt = if (change == LiveChange.STARTED) {
+            current.startedAtEpochSeconds ?: observedAt
+        } else {
+            previous.startedAtEpochSeconds ?: current.startedAtEpochSeconds
+        }
+        val endedAt = if (change == LiveChange.ENDED) observedAt else null
+        val eventTime = when (change) {
+            LiveChange.STARTED -> startedAt ?: observedAt
+            LiveChange.ENDED -> endedAt ?: observedAt
+        }
+
+        return LiveStatusUpdate(
+            platform = BILIBILI_PLATFORM,
+            publisher = publisher,
+            roomId = current.roomId.ifBlank { previous.roomId },
+            time = eventTime,
+            title = current.title.ifBlank { previous.title },
+            area = current.area ?: previous.area,
+            cover = current.cover ?: previous.cover,
+            link = liveLink(current.roomId.ifBlank { previous.roomId }),
+            status = current.status,
+            previousStatus = previous.status,
+            change = change,
+            startedAt = startedAt,
+            endedAt = endedAt,
+        )
     }
 
     private suspend fun replayMissingDynamics() {
@@ -481,7 +641,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                 if (raw.time <= cursor.lastSeenAt || cursor.hasSeen(dynamicId)) return@dynamicLoop
 
                 val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
-                DynamicEvent(source = pluginId, dynamic = dynamic).broadcast()
+                SourceUpdateEvent(source = pluginId, update = dynamic).broadcast()
                 cursor = cursorStore.markSeen(target.publisher.id.toString(), dynamicId, raw.time)
             }
         }
@@ -565,6 +725,21 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         return config.followGroupName.trim().takeIf { it.isNotBlank() }
     }
 
+    private suspend fun ensureLiveBaseline(publisher: Publisher) {
+        if (!config.liveDetectionEnabled || liveStatusStore.get(publisher.id.toString()) != null) return
+        val uid = publisher.externalId.toLongOrNull() ?: return
+        val now = System.currentTimeMillis() / 1000
+        val snapshot = fetchLiveSnapshotsByUid(listOf(publisher))[uid]
+        liveStatusStore.save(
+            buildLiveState(
+                publisher = publisher,
+                snapshot = snapshot,
+                previous = null,
+                observedAt = now,
+            )
+        )
+    }
+
     private suspend fun handleSubscribed(event: SubscriptionChangedEvent) {
         val publisherId = event.publisher.id
         val snapshot = SubscriptionRepository.findActivePublisherWithSubscribersById(publisherId)
@@ -585,6 +760,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         }
 
         if (taskScheduler.isRunning(detectTaskId)) {
+            ensureLiveBaseline(snapshot.publisher)
             detectAndPublish()
         }
     }
@@ -712,6 +888,10 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         return "$BILIBILI_DYNAMIC_HOME/$dynamicId"
     }
 
+    private fun liveLink(roomId: String): String {
+        return if (roomId.isBlank()) BILIBILI_LIVE_HOME else "$BILIBILI_LIVE_HOME/$roomId"
+    }
+
     private fun fallbackPublisher(): Publisher {
         return Publisher(
             id = 0,
@@ -734,5 +914,14 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
 
     private companion object {
         private const val BILIBILI_DYNAMIC_HOME: String = "https://t.bilibili.com"
+        private const val BILIBILI_HOME: String = "https://www.bilibili.com"
+        private const val BILIBILI_LIVE_HOME: String = "https://live.bilibili.com"
+        private val BILIBILI_PLATFORM: PlatformDescriptor = PlatformDescriptor(
+            id = "bilibili",
+            name = "Bilibili",
+            homepage = BILIBILI_HOME,
+            iconUri = "$BILIBILI_HOME/favicon.ico",
+            kind = PlatformKind.PUBLISHER,
+        )
     }
 }

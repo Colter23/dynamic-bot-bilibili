@@ -7,6 +7,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import top.colter.bilibili.api.follow
 import top.colter.bilibili.api.getCurrentUserNav
 import top.colter.bilibili.api.getDynamicDetail
+import top.colter.bilibili.api.getLiveStatusBatch
 import top.colter.bilibili.api.getNewDynamic
 import top.colter.bilibili.api.getGroupList
 import top.colter.bilibili.api.getUserInfo
@@ -32,6 +33,7 @@ import top.colter.dynamic.core.plugin.PublisherLoginAccount
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
+import top.colter.dynamic.core.data.LiveStatus
 import kotlinx.coroutines.CancellationException
 import java.net.HttpURLConnection
 import java.net.URI
@@ -43,6 +45,16 @@ internal data class BilibiliPublisherSnapshot(
     val faceUrl: String,
     val headerUrl: String? = null,
     val pendantUrl: String? = null,
+)
+
+internal data class BilibiliLiveSnapshot(
+    val userId: String,
+    val roomId: String,
+    val status: LiveStatus,
+    val title: String,
+    val area: String? = null,
+    val coverUrl: String? = null,
+    val startedAtEpochSeconds: Long? = null,
 )
 
 internal interface BilibiliPlatformGateway {
@@ -59,6 +71,10 @@ internal interface BilibiliPlatformGateway {
     }
 
     suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot?
+
+    suspend fun fetchLiveStatusBatch(uids: Iterable<Long>): List<BilibiliLiveSnapshot> {
+        throw UnsupportedOperationException("不支持直播状态查询")
+    }
 
     suspend fun queryFollowState(userId: String): FollowState
 
@@ -176,6 +192,34 @@ internal class BilibiliPollService(
             headerUrl = null,
             pendantUrl = info.pendant?.image?.url?.takeIf { it.isNotBlank() },
         )
+    }
+
+    override suspend fun fetchLiveStatusBatch(uids: Iterable<Long>): List<BilibiliLiveSnapshot> {
+        val uidList = uids.toList()
+        if (uidList.isEmpty()) return emptyList()
+        val data = client.getLiveStatusBatch(uidList)
+        applyRequestDelay()
+        return data.map { (uid, live) ->
+            BilibiliLiveSnapshot(
+                userId = live.uid.takeIf { it > 0 }?.toString() ?: uid.toString(),
+                roomId = live.roomId.takeIf { it > 0 }?.toString().orEmpty(),
+                status = when (live.liveStatus) {
+                    1 -> LiveStatus.OPEN
+                    2 -> LiveStatus.ROUND
+                    else -> LiveStatus.CLOSE
+                },
+                title = live.title,
+                area = live.area.takeIf { it.isNotBlank() },
+                coverUrl = live.cover.takeIf { it.isNotBlank() }?.let { cover ->
+                    when {
+                        cover.startsWith("//") -> "https:$cover"
+                        cover.startsWith("/") -> "https://www.bilibili.com$cover"
+                        else -> cover
+                    }
+                },
+                startedAtEpochSeconds = live.liveTime.takeIf { it > 0 },
+            )
+        }
     }
 
     override suspend fun queryFollowState(userId: String): FollowState {
@@ -439,6 +483,6 @@ internal class BilibiliPollService(
         private const val QR_EXPIRES_SECONDS: Long = 180
         private const val MAX_SHORT_URL_REDIRECTS: Int = 5
         private const val USER_AGENT: String = "dynamic-bot/0.0.3"
-        private val HTTP_REDIRECT_RANGE: IntRange = 300..399
+private val HTTP_REDIRECT_RANGE: IntRange = 300..399
     }
 }

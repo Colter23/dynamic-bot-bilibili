@@ -4,6 +4,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import top.colter.bilibili.data.LazyImage as BiliLazyImage
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.BiliDynamicList
@@ -18,12 +19,16 @@ import top.colter.bilibili.data.user.BiliGroup
 import top.colter.bilibili.data.user.BiliUserNav
 import top.colter.bilibili.exception.BiliLoginException
 import top.colter.dynamic.core.data.LazyImage as CoreLazyImage
+import top.colter.dynamic.core.data.LiveChange
+import top.colter.dynamic.core.data.LiveStatus
+import top.colter.dynamic.core.data.LiveStatusUpdate
 import top.colter.dynamic.core.data.PublisherCursor
+import top.colter.dynamic.core.data.PublisherLiveStatus
 import top.colter.dynamic.core.data.PublisherProfile
 import top.colter.dynamic.core.data.SubscriberType
-import top.colter.dynamic.core.event.DynamicEvent
 import top.colter.dynamic.core.event.EventManger
 import top.colter.dynamic.core.event.Listener
+import top.colter.dynamic.core.event.SourceUpdateEvent
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
 import top.colter.dynamic.core.event.SubscriptionChangeType
 import top.colter.dynamic.core.event.register
@@ -528,12 +533,12 @@ class BilibiliPublisherPluginTest {
         )
         gateway.setDynamicPages(mapOf(1 to dynamicPage(false, rawDynamic)))
 
-        val received = CompletableDeferred<DynamicEvent>()
-        object : Listener<DynamicEvent> {
-            override suspend fun onMessage(event: DynamicEvent) {
+        val received = CompletableDeferred<SourceUpdateEvent>()
+        object : Listener<SourceUpdateEvent> {
+            override suspend fun onMessage(event: SourceUpdateEvent) {
                 if (!received.isCompleted) received.complete(event)
             }
-        }.register<DynamicEvent>()
+        }.register<SourceUpdateEvent>()
 
         plugin.onSubscriptionChanged(
             SubscriptionChangedEvent(
@@ -547,7 +552,7 @@ class BilibiliPublisherPluginTest {
 
         val dynamicEvent = withTimeout(3_000) { received.await() }
         assertNull(dynamicEvent.target)
-        assertEquals(rawDynamic.id.toString(), dynamicEvent.dynamic.dynamicId)
+        assertEquals(rawDynamic.id.toString(), dynamicEvent.update.updateId)
         assertEquals(listOf(1), gateway.requestedPages)
         assertEquals(
             rawDynamic.id.toString(),
@@ -555,6 +560,99 @@ class BilibiliPublisherPluginTest {
         )
 
         plugin.stop()
+    }
+
+    @Test
+    fun `live polling should baseline startup then emit started and ended updates`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
+        )
+        val liveStore = InMemoryLiveStatusStore()
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(pollingIntervalMs = 25),
+            liveStatusStore = liveStore,
+        )
+        seedPublisherAndSubscriber()
+        val received = kotlinx.coroutines.channels.Channel<SourceUpdateEvent>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        object : Listener<SourceUpdateEvent> {
+            override suspend fun onMessage(event: SourceUpdateEvent) {
+                received.send(event)
+            }
+        }.register<SourceUpdateEvent>()
+
+        plugin.init()
+        plugin.start()
+        assertEquals(LiveStatus.CLOSE, liveStore.get("1")?.status)
+        assertNull(withTimeoutOrNull(100) { received.receive() })
+
+        val startedAt = System.currentTimeMillis() / 1000
+        gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.OPEN, startedAt)))
+        val started = withTimeout(3_000) { received.receive() }.update as LiveStatusUpdate
+        assertEquals(LiveChange.STARTED, started.change)
+        assertEquals("456", started.roomId)
+        assertEquals(startedAt, started.startedAt)
+
+        gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.CLOSE)))
+        val ended = withTimeout(3_000) { received.receive() }.update as LiveStatusUpdate
+        assertEquals(LiveChange.ENDED, ended.change)
+        assertEquals(startedAt, ended.startedAt)
+        assertTrue(ended.endedAt != null)
+
+        plugin.stop()
+    }
+
+    @Test
+    fun `live polling should not emit close and round transitions`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
+        )
+        val plugin = testPlugin(gateway, config = testConfig(pollingIntervalMs = 25))
+        seedPublisherAndSubscriber()
+        val received = CompletableDeferred<SourceUpdateEvent>()
+        object : Listener<SourceUpdateEvent> {
+            override suspend fun onMessage(event: SourceUpdateEvent) {
+                if (!received.isCompleted) received.complete(event)
+            }
+        }.register<SourceUpdateEvent>()
+
+        plugin.init()
+        plugin.start()
+        gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.ROUND)))
+
+        assertNull(withTimeoutOrNull(200) { received.await() })
+        plugin.stop()
+    }
+
+    @Test
+    fun `live polling should request status in configured batches`() {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(pollingIntervalMs = 30_000, liveStatusBatchSize = 2),
+        )
+        seedPublisherAndSubscriber(externalId = "101", targetId = "9001")
+        seedPublisherAndSubscriber(externalId = "102", targetId = "9002")
+        seedPublisherAndSubscriber(externalId = "103", targetId = "9003")
+
+        plugin.init()
+        plugin.start()
+        plugin.stop()
+
+        assertEquals(listOf(listOf(101L, 102L), listOf(103L)), gateway.requestedLiveBatches.take(2))
     }
 
     @Test
@@ -637,6 +735,7 @@ class BilibiliPublisherPluginTest {
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
         taskScheduler: TaskScheduler = TaskScheduler(),
         cursorStore: BilibiliCursorStore = InMemoryCursorStore(),
+        liveStatusStore: BilibiliLiveStatusStore = InMemoryLiveStatusStore(),
     ): BilibiliPublisherPlugin {
         val tempDir = createTempDirectory("dynamic-bot-bilibili-test").toFile()
         PersistenceManager.init(tempDir.resolve("test.db").path)
@@ -644,6 +743,7 @@ class BilibiliPublisherPluginTest {
             loadConfig = { config },
             serviceFactory = { gateway },
             cursorStoreFactory = { cursorStore },
+            liveStatusStoreFactory = { liveStatusStore },
             saveConfig = saveConfig,
             taskScheduler = taskScheduler,
         )
@@ -656,6 +756,8 @@ class BilibiliPublisherPluginTest {
         pollingIntervalMs: Long = 30_000,
         requestIntervalMs: Long = 0,
         shortUrlResolveTimeoutMs: Long = 3_000,
+        liveDetectionEnabled: Boolean = true,
+        liveStatusBatchSize: Int = 50,
     ): BilibiliPublisherConfig {
         return BilibiliPublisherConfig(
             pollingIntervalMs = pollingIntervalMs,
@@ -664,6 +766,8 @@ class BilibiliPublisherPluginTest {
             replayWindowHours = replayWindowHours,
             followGroupName = followGroupName,
             shortUrlResolveTimeoutMs = shortUrlResolveTimeoutMs,
+            liveDetectionEnabled = liveDetectionEnabled,
+            liveStatusBatchSize = liveStatusBatchSize,
         )
     }
 
@@ -680,18 +784,21 @@ class BilibiliPublisherPluginTest {
         )
     }
 
-    private fun seedPublisherAndSubscriber(): SeededSubscription {
+    private fun seedPublisherAndSubscriber(
+        externalId: String = "123",
+        targetId: String = "9001",
+    ): SeededSubscription {
         val publisher = PublisherRepository.upsertProfile(
             PublisherProfile(
                 platformId = "bilibili",
-                externalId = "123",
+                externalId = externalId,
                 name = "demo-up",
                 face = CoreLazyImage("https://example.com/face.png"),
             ),
         ).value
         val subscriber = SubscriberRepository.upsert(
             platformId = "qq",
-            targetId = "9001",
+            targetId = targetId,
             name = "demo-subscriber",
             type = SubscriberType.GROUP,
         ).value
@@ -756,12 +863,15 @@ class BilibiliPublisherPluginTest {
         private val shortUrlExpansions: Map<String, String?> = emptyMap(),
         initialDynamicPages: Map<Int, BiliDynamicList> = emptyMap(),
         initialGroups: List<BiliGroup> = emptyList(),
+        initialLiveSnapshots: Map<Long, BilibiliLiveSnapshot> = emptyMap(),
     ) : BilibiliPlatformGateway {
         private val groups: MutableList<BiliGroup> = initialGroups.toMutableList()
         private val dynamicPages: MutableMap<Int, BiliDynamicList> = initialDynamicPages.toMutableMap()
+        private val liveSnapshots: MutableMap<Long, BilibiliLiveSnapshot> = initialLiveSnapshots.toMutableMap()
         private var nextGroupId: Long = (groups.maxOfOrNull { it.tid } ?: 0L) + 1L
 
         val requestedPages: MutableList<Int> = mutableListOf()
+        val requestedLiveBatches: MutableList<List<Long>> = mutableListOf()
         var groupFetchCount: Int = 0
             private set
         val createdGroupNames: MutableList<String> = mutableListOf()
@@ -788,6 +898,17 @@ class BilibiliPublisherPluginTest {
         override suspend fun fetchDynamicDetail(dynamicId: String): BiliDynamic? {
             requestedDetails.add(dynamicId)
             return dynamicDetails[dynamicId]
+        }
+
+        override suspend fun fetchLiveStatusBatch(uids: Iterable<Long>): List<BilibiliLiveSnapshot> {
+            val requested = uids.toList()
+            requestedLiveBatches.add(requested)
+            return requested.mapNotNull { liveSnapshots[it] }
+        }
+
+        fun setLiveSnapshots(next: Map<Long, BilibiliLiveSnapshot>) {
+            liveSnapshots.clear()
+            liveSnapshots.putAll(next)
         }
 
         override suspend fun expandShortUrl(url: String, timeoutMs: Long): String? {
@@ -895,6 +1016,33 @@ class BilibiliPublisherPluginTest {
         fun put(publisherId: String, cursor: PublisherCursor) {
             states[publisherId] = cursor
         }
+    }
+
+    private class InMemoryLiveStatusStore(
+        initialStates: Map<String, PublisherLiveStatus> = emptyMap(),
+    ) : BilibiliLiveStatusStore {
+        private val states: MutableMap<String, PublisherLiveStatus> = linkedMapOf<String, PublisherLiveStatus>().apply {
+            putAll(initialStates)
+        }
+
+        override fun get(publisherId: String): PublisherLiveStatus? = states[publisherId]
+
+        override fun save(state: PublisherLiveStatus): PublisherLiveStatus {
+            states[state.publisherId.toString()] = state
+            return state
+        }
+    }
+
+    private fun liveSnapshot(status: LiveStatus, startedAt: Long? = null): BilibiliLiveSnapshot {
+        return BilibiliLiveSnapshot(
+            userId = "123",
+            roomId = "456",
+            status = status,
+            title = "Live title",
+            area = "Games",
+            coverUrl = "https://example.com/cover.png",
+            startedAtEpochSeconds = startedAt,
+        )
     }
 
     private data class SeededSubscription(

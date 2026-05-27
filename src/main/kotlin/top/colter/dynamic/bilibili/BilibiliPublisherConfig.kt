@@ -11,6 +11,8 @@ public data class BilibiliPublisherConfig(
     val replayWindowHours: Int = 0,
     val followGroupName: String = "",
     val shortUrlResolveTimeoutMs: Long = 3_000,
+    val liveDetectionEnabled: Boolean = true,
+    val liveStatusBatchSize: Int = 50,
     val cookiesJson: String = "",
 )
 
@@ -73,6 +75,19 @@ public object BilibiliPublisherConfigForm {
                 restartRequired = true,
                 restartTarget = "Bilibili 插件",
             ),
+            ConfigFieldSpec(
+                path = "liveDetectionEnabled",
+                label = "直播检测",
+                type = ConfigFieldType.BOOLEAN,
+                section = "直播",
+            ),
+            ConfigFieldSpec(
+                path = "liveStatusBatchSize",
+                label = "直播状态批量查询数量",
+                type = ConfigFieldType.NUMBER,
+                section = "直播",
+                min = 1,
+            ),
         ),
     )
 
@@ -82,5 +97,6 @@ public object BilibiliPublisherConfigForm {
         require(config.requestIntervalMs >= 0) { "requestIntervalMs must not be negative" }
         require(config.replayWindowHours >= 0) { "replayWindowHours must not be negative" }
         require(config.shortUrlResolveTimeoutMs >= 1) { "shortUrlResolveTimeoutMs must be at least 1" }
+        require(config.liveStatusBatchSize >= 1) { "直播状态批量查询数量不能小于 1" }
     }
 }
