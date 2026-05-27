@@ -194,7 +194,7 @@ internal class BilibiliDynamicMapper {
             pic = url.toCoreImageOrNull() ?: return null,
             width = width,
             height = height,
-            size = size.toFloat(),
+            size = size?.toFloat(),
         )
     }
 
