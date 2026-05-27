@@ -58,7 +58,7 @@ internal class BilibiliDynamicMapper {
             platform = BILIBILI_PLATFORM,
             dynamicId = dynamicId,
             publisher = buildPublisher(source.modules.author, fallbackPublisher),
-            time = source.timestampSeconds() * 1000,
+            time = source.timestampSeconds(),
             link = dynamicLink(dynamicId),
             notice = buildNotice(source),
             title = buildTitle(source),

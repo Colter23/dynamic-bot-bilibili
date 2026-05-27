@@ -92,7 +92,7 @@ class BilibiliDynamicMapperTest {
 
         val mapped = assertNotNull(mapper.map(source, fallbackPublisher()))
 
-        assertEquals(123_000L, mapped.time)
+        assertEquals(123L, mapped.time)
         assertEquals("hello [ok]#topic#", mapped.content?.text)
         assertIs<DynamicContentNodeEmoji>(mapped.content?.contentNodes?.get(1))
         val topic = assertIs<DynamicContentNodeLink>(mapped.content?.contentNodes?.get(2))
