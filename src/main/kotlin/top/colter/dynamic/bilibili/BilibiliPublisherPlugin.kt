@@ -802,12 +802,42 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
 
     private fun persistCookiesIfLoggedIn(result: PublisherLoginResult) {
         if (result.status != PublisherLoginStatus.SUCCESS) return
-        config = config.copy(cookiesJson = pollService.exportCookiesJson())
+        config = config.copy(cookiesJson = compactJson(pollService.exportCookiesJson()))
         runCatching {
             saveConfig(pluginId, config)
         }.onFailure {
             logger.warn(it) { "保存 Bilibili 登录信息失败" }
         }
+    }
+
+    private fun compactJson(json: String): String {
+        val trimmed = json.trim()
+        if (trimmed.isEmpty()) return ""
+
+        val compact = StringBuilder(trimmed.length)
+        var inString = false
+        var escaping = false
+
+        trimmed.forEach { char ->
+            if (inString) {
+                compact.append(char)
+                when {
+                    escaping -> escaping = false
+                    char == '\\' -> escaping = true
+                    char == '"' -> inString = false
+                }
+            } else {
+                when {
+                    char == '"' -> {
+                        inString = true
+                        compact.append(char)
+                    }
+                    !char.isWhitespace() -> compact.append(char)
+                }
+            }
+        }
+
+        return compact.toString()
     }
 
     private fun startDetectionTask(): Boolean {

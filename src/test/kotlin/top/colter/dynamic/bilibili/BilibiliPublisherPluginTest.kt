@@ -390,7 +390,14 @@ class BilibiliPublisherPluginTest {
             followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.FAILED, "not logged in"),
             cookieLoginResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "cookie login success"),
-            exportedCookiesJson = """[{"name":"SESSDATA","value":"demo"}]""",
+            exportedCookiesJson = """
+                [
+                  {
+                    "name": "SESSDATA",
+                    "value": "demo value"
+                  }
+                ]
+            """.trimIndent(),
         )
         var savedConfig: BilibiliPublisherConfig? = null
         val plugin = testPlugin(
@@ -409,7 +416,7 @@ class BilibiliPublisherPluginTest {
 
         assertEquals(PublisherLoginStatus.SUCCESS, result.status)
         assertTrue(scheduler.isRunning("bilibili-detect"))
-        assertEquals("""[{"name":"SESSDATA","value":"demo"}]""", savedConfig?.cookiesJson)
+        assertEquals("""[{"name":"SESSDATA","value":"demo value"}]""", savedConfig?.cookiesJson)
 
         plugin.stop()
     }
@@ -446,7 +453,14 @@ class BilibiliPublisherPluginTest {
             followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.FAILED, "not logged in"),
             qrLoginResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "qr login success"),
-            exportedCookiesJson = """[{"name":"SESSDATA","value":"qr-demo"}]""",
+            exportedCookiesJson = """
+                [
+                  {
+                    "name": "SESSDATA",
+                    "value": "qr demo"
+                  }
+                ]
+            """.trimIndent(),
         )
         var savedConfig: BilibiliPublisherConfig? = null
         val plugin = testPlugin(
@@ -465,7 +479,7 @@ class BilibiliPublisherPluginTest {
 
         assertEquals(PublisherLoginStatus.SUCCESS, result.status)
         assertTrue(scheduler.isRunning("bilibili-detect"))
-        assertEquals("""[{"name":"SESSDATA","value":"qr-demo"}]""", savedConfig?.cookiesJson)
+        assertEquals("""[{"name":"SESSDATA","value":"qr demo"}]""", savedConfig?.cookiesJson)
 
         plugin.stop()
     }

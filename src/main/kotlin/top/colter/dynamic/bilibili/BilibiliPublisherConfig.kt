@@ -5,14 +5,14 @@ import top.colter.dynamic.core.config.ConfigFieldType
 import top.colter.dynamic.core.config.ConfigFormSpec
 
 public data class BilibiliPublisherConfig(
-    val pollingIntervalMs: Long = 30_000,
+    val pollingIntervalMs: Long = 15_000,
     val fetchLimit: Int = 5,
     val requestIntervalMs: Long = 500,
     val replayWindowHours: Int = 0,
     val followGroupName: String = "",
     val shortUrlResolveTimeoutMs: Long = 3_000,
     val liveDetectionEnabled: Boolean = true,
-    val liveStatusBatchSize: Int = 50,
+    val liveStatusBatchSize: Int = 30,
     val cookiesJson: String = "",
 )
 
