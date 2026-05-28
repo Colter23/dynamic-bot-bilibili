@@ -243,7 +243,7 @@ class BilibiliPublisherPluginTest {
             lastSeenAt = now - 5_000L,
             recentDynamicIds = emptyList(),
         )
-        cursorStore.put(seeded.publisher.id.toString(), existingCursor)
+        cursorStore.put(seeded.publisher.id, existingCursor)
         val page1Newest = buildDynamic(now - 3_600L, seeded.publisher.externalId.toLong(), "demo-up", 1)
         val page1Older = buildDynamic(now - 3_700L, seeded.publisher.externalId.toLong(), "demo-up", 2)
         val page2Newest = buildDynamic(now - 3_800L, seeded.publisher.externalId.toLong(), "demo-up", 3)
@@ -258,7 +258,7 @@ class BilibiliPublisherPluginTest {
         plugin.init()
         plugin.start()
 
-        val publisherId = seeded.publisher.id.toString()
+        val publisherId = seeded.publisher.id
         assertEquals(
             listOf(
                 dynamicIdFor(now - 3_700L, 2),
@@ -294,7 +294,7 @@ class BilibiliPublisherPluginTest {
             lastSeenAt = now - 5_000L,
             recentDynamicIds = emptyList(),
         )
-        cursorStore.put(seeded.publisher.id.toString(), existingCursor)
+        cursorStore.put(seeded.publisher.id, existingCursor)
         val page1Newest = buildDynamic(now - 3_600L, seeded.publisher.externalId.toLong(), "demo-up", 1)
         val page1Older = buildDynamic(now - 3_700L, seeded.publisher.externalId.toLong(), "demo-up", 2)
         val page2Newest = buildDynamic(now - 3_800L, seeded.publisher.externalId.toLong(), "demo-up", 3)
@@ -309,7 +309,7 @@ class BilibiliPublisherPluginTest {
         plugin.init()
         plugin.start()
 
-        val publisherId = seeded.publisher.id.toString()
+        val publisherId = seeded.publisher.id
         assertEquals(
             listOf(
                 dynamicIdFor(now - 3_900L, 4),
@@ -556,7 +556,7 @@ class BilibiliPublisherPluginTest {
         assertEquals(listOf(1), gateway.requestedPages)
         assertEquals(
             rawDynamic.id.toString(),
-            cursorStore.markedDynamicIds(seeded.publisher.id.toString()).last(),
+            cursorStore.markedDynamicIds(seeded.publisher.id).last(),
         )
 
         plugin.stop()
@@ -587,7 +587,7 @@ class BilibiliPublisherPluginTest {
 
         plugin.init()
         plugin.start()
-        assertEquals(LiveStatus.CLOSE, liveStore.get("1")?.status)
+        assertEquals(LiveStatus.CLOSE, liveStore.get(1)?.status)
         assertNull(withTimeoutOrNull(100) { received.receive() })
 
         val startedAt = System.currentTimeMillis() / 1000
@@ -665,7 +665,7 @@ class BilibiliPublisherPluginTest {
         val result = service.checkLoginState()
 
         assertEquals(PublisherLoginStatus.FAILED, result.status)
-        assertEquals("Bilibili is not logged in", result.message)
+        assertEquals("Bilibili 未登录", result.message)
     }
 
     @Test
@@ -977,21 +977,21 @@ class BilibiliPublisherPluginTest {
     }
 
     private class InMemoryCursorStore(
-        initialStates: Map<String, PublisherCursor> = emptyMap(),
+        initialStates: Map<Int, PublisherCursor> = emptyMap(),
     ) : BilibiliCursorStore {
-        private val states: MutableMap<String, PublisherCursor> = linkedMapOf<String, PublisherCursor>().apply {
+        private val states: MutableMap<Int, PublisherCursor> = linkedMapOf<Int, PublisherCursor>().apply {
             putAll(initialStates)
         }
         private val marks: MutableList<CursorMark> = mutableListOf()
 
-        override fun get(publisherId: String): PublisherCursor? = states[publisherId]
+        override fun get(publisherId: Int): PublisherCursor? = states[publisherId]
 
-        override fun ensureBaseline(publisherId: String, timestamp: Long): PublisherCursor {
+        override fun ensureBaseline(publisherId: Int, timestamp: Long): PublisherCursor {
             states[publisherId]?.let { return it }
             return markSeen(publisherId, "__baseline__$timestamp", timestamp)
         }
 
-        override fun markSeen(publisherId: String, dynamicId: String, timestamp: Long): PublisherCursor {
+        override fun markSeen(publisherId: Int, dynamicId: String, timestamp: Long): PublisherCursor {
             val previous = states[publisherId]
             val recent = LinkedHashSet(previous?.recentDynamicIds ?: emptyList())
             recent.add(dynamicId)
@@ -999,7 +999,7 @@ class BilibiliPublisherPluginTest {
                 recent.remove(recent.first())
             }
             val updated = PublisherCursor(
-                publisherId = publisherId.toInt(),
+                publisherId = publisherId,
                 lastSeenDynamicId = dynamicId,
                 lastSeenAt = timestamp,
                 recentDynamicIds = recent.toList(),
@@ -1009,26 +1009,26 @@ class BilibiliPublisherPluginTest {
             return updated
         }
 
-        fun markedDynamicIds(publisherId: String): List<String> {
+        fun markedDynamicIds(publisherId: Int): List<String> {
             return marks.filter { it.publisherId == publisherId }.map { it.dynamicId }
         }
 
-        fun put(publisherId: String, cursor: PublisherCursor) {
+        fun put(publisherId: Int, cursor: PublisherCursor) {
             states[publisherId] = cursor
         }
     }
 
     private class InMemoryLiveStatusStore(
-        initialStates: Map<String, PublisherLiveStatus> = emptyMap(),
+        initialStates: Map<Int, PublisherLiveStatus> = emptyMap(),
     ) : BilibiliLiveStatusStore {
-        private val states: MutableMap<String, PublisherLiveStatus> = linkedMapOf<String, PublisherLiveStatus>().apply {
+        private val states: MutableMap<Int, PublisherLiveStatus> = linkedMapOf<Int, PublisherLiveStatus>().apply {
             putAll(initialStates)
         }
 
-        override fun get(publisherId: String): PublisherLiveStatus? = states[publisherId]
+        override fun get(publisherId: Int): PublisherLiveStatus? = states[publisherId]
 
         override fun save(state: PublisherLiveStatus): PublisherLiveStatus {
-            states[state.publisherId.toString()] = state
+            states[state.publisherId] = state
             return state
         }
     }
@@ -1051,7 +1051,7 @@ class BilibiliPublisherPluginTest {
     )
 
     private data class CursorMark(
-        val publisherId: String,
+        val publisherId: Int,
         val dynamicId: String,
         val timestamp: Long,
     )

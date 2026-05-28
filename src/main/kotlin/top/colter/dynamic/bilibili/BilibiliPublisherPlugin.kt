@@ -342,7 +342,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             }
 
         publisherSnapshot.values.forEach publisherLoop@{ publisher ->
-            val publisherId = publisher.id.toString()
+            val publisherId = publisher.id
             val uid = publisher.externalId.toLongOrNull() ?: return@publisherLoop
             val publisherDynamics = dynamicsByPublisher[uid].orEmpty()
             if (publisherDynamics.isEmpty()) return@publisherLoop
@@ -426,7 +426,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             }
 
         publisherSnapshot.values.forEach publisherLoop@{ publisher ->
-            val publisherId = publisher.id.toString()
+            val publisherId = publisher.id
             val uid = publisher.externalId.toLongOrNull() ?: return@publisherLoop
             if (cursorStore.get(publisherId) == null) return@publisherLoop
 
@@ -455,7 +455,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         val liveByUid = fetchLiveSnapshotsByUid(publisherSnapshot.values)
         publisherSnapshot.values.forEach { publisher ->
             val uid = publisher.externalId.toLongOrNull() ?: return@forEach
-            val previous = liveStatusStore.get(publisher.id.toString())
+            val previous = liveStatusStore.get(publisher.id)
             val current = buildLiveState(
                 publisher = publisher,
                 snapshot = liveByUid[uid],
@@ -473,7 +473,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         val liveByUid = fetchLiveSnapshotsByUid(publisherSnapshot.values)
         publisherSnapshot.values.forEach { publisher ->
             val uid = publisher.externalId.toLongOrNull() ?: return@forEach
-            val previous = liveStatusStore.get(publisher.id.toString())
+            val previous = liveStatusStore.get(publisher.id)
             val current = buildLiveState(
                 publisher = publisher,
                 snapshot = liveByUid[uid],
@@ -596,7 +596,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         val nowEpochSeconds = System.currentTimeMillis() / 1000
         val targets = publisherSnapshot.values.mapNotNull { publisher ->
             val userId = publisher.externalId.toLongOrNull() ?: return@mapNotNull null
-            val cursor = cursorStore.get(publisher.id.toString()) ?: return@mapNotNull null
+            val cursor = cursorStore.get(publisher.id) ?: return@mapNotNull null
             val lowerBound = cursor.replayLowerBoundAtEpochSeconds(config.replayWindowHours, nowEpochSeconds) ?: return@mapNotNull null
             ReplayTarget(
                 publisher = publisher,
@@ -642,7 +642,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
 
                 val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
                 SourceUpdateEvent(source = pluginId, update = dynamic).broadcast()
-                cursor = cursorStore.markSeen(target.publisher.id.toString(), dynamicId, raw.time)
+                cursor = cursorStore.markSeen(target.publisher.id, dynamicId, raw.time)
             }
         }
     }
@@ -726,7 +726,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     }
 
     private suspend fun ensureLiveBaseline(publisher: Publisher) {
-        if (!config.liveDetectionEnabled || liveStatusStore.get(publisher.id.toString()) != null) return
+        if (!config.liveDetectionEnabled || liveStatusStore.get(publisher.id) != null) return
         val uid = publisher.externalId.toLongOrNull() ?: return
         val now = System.currentTimeMillis() / 1000
         val snapshot = fetchLiveSnapshotsByUid(listOf(publisher))[uid]
@@ -755,8 +755,8 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             publishers = publishers + (snapshot.publisher.id to snapshot.publisher)
             !wasPresent
         }
-        if (becamePresent && cursorStore.get(publisherId.toString()) == null) {
-            cursorStore.ensureBaseline(publisherId.toString(), event.subscription.createdAtEpochSeconds)
+        if (becamePresent && cursorStore.get(publisherId) == null) {
+            cursorStore.ensureBaseline(publisherId, event.subscription.createdAtEpochSeconds)
         }
 
         if (taskScheduler.isRunning(detectTaskId)) {

@@ -59,15 +59,15 @@ internal data class BilibiliLiveSnapshot(
 
 internal interface BilibiliPlatformGateway {
     suspend fun fetchNewDynamicPage(page: Int = 1, type: String = "all"): BiliDynamicList {
-        throw UnsupportedOperationException("dynamic page fetch is unsupported")
+        throw UnsupportedOperationException("不支持拉取动态列表")
     }
 
     suspend fun fetchDynamicDetail(dynamicId: String): BiliDynamic? {
-        throw UnsupportedOperationException("dynamic detail fetch is unsupported")
+        throw UnsupportedOperationException("不支持拉取动态详情")
     }
 
     suspend fun expandShortUrl(url: String, timeoutMs: Long): String? {
-        throw UnsupportedOperationException("short URL expansion is unsupported")
+        throw UnsupportedOperationException("不支持短链接解析")
     }
 
     suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot?
@@ -81,21 +81,21 @@ internal interface BilibiliPlatformGateway {
     suspend fun followPublisher(userId: String): FollowActionResult
 
     suspend fun fetchFollowGroups(): List<BiliGroup> {
-        throw UnsupportedOperationException("follow group api is unsupported")
+        throw UnsupportedOperationException("不支持关注分组接口")
     }
 
     suspend fun createFollowGroup(tag: String) {
-        throw UnsupportedOperationException("follow group api is unsupported")
+        throw UnsupportedOperationException("不支持关注分组接口")
     }
 
     suspend fun addUsersToFollowGroup(fids: Iterable<Long>, tagIds: Iterable<Long>) {
-        throw UnsupportedOperationException("follow group api is unsupported")
+        throw UnsupportedOperationException("不支持关注分组接口")
     }
 
     suspend fun checkLoginState(): PublisherLoginResult {
         return PublisherLoginResult(
             status = PublisherLoginStatus.UNSUPPORTED,
-            message = "login status check is unsupported",
+            message = "不支持登录状态检查",
         )
     }
 
@@ -107,7 +107,7 @@ internal interface BilibiliPlatformGateway {
     suspend fun loginByCookie(cookie: String): PublisherLoginResult {
         return PublisherLoginResult(
             status = PublisherLoginStatus.UNSUPPORTED,
-            message = "cookie login is unsupported",
+            message = "不支持 Cookie 登录",
         )
     }
 
@@ -117,7 +117,7 @@ internal interface BilibiliPlatformGateway {
     ): PublisherLoginResult {
         return PublisherLoginResult(
             status = PublisherLoginStatus.UNSUPPORTED,
-            message = "QR code login is unsupported",
+            message = "不支持二维码登录",
         )
     }
 }
@@ -240,7 +240,7 @@ internal class BilibiliPollService(
                 val uid = userId.toLongOrNull()
                     ?: return FollowActionResult(
                         FollowActionStatus.FAILED,
-                        "invalid bilibili user id: $userId",
+                        "无效的 Bilibili 用户 ID：$userId",
                     )
                 client.follow(uid)
                 applyRequestDelay()
@@ -270,7 +270,7 @@ internal class BilibiliPollService(
             val nav = currentUserNavProvider()
             PublisherLoginResult(
                 status = PublisherLoginStatus.SUCCESS,
-                message = "login success",
+                message = "登录成功",
                 account = PublisherLoginAccount(
                     userId = nav.mid.takeIf { it > 0 }?.toString(),
                     name = nav.name.takeIf { it.isNotBlank() },
@@ -281,12 +281,12 @@ internal class BilibiliPollService(
         } catch (e: BiliLoginException) {
             PublisherLoginResult(
                 status = PublisherLoginStatus.FAILED,
-                message = "Bilibili is not logged in",
+                message = "Bilibili 未登录",
             )
         } catch (e: Throwable) {
             PublisherLoginResult(
                 status = PublisherLoginStatus.FAILED,
-                message = e.message ?: "login check failed",
+                message = e.message ?: "登录状态检查失败",
             )
         } finally {
             applyRequestDelay()
@@ -304,7 +304,7 @@ internal class BilibiliPollService(
     override suspend fun loginByCookie(cookie: String): PublisherLoginResult {
         val trimmed = cookie.trim()
         if (trimmed.isBlank()) {
-            return PublisherLoginResult(PublisherLoginStatus.FAILED, "cookie is blank")
+            return PublisherLoginResult(PublisherLoginStatus.FAILED, "Cookie 不能为空")
         }
 
         return importAndVerifyCookies {
@@ -313,7 +313,7 @@ internal class BilibiliPollService(
             } else {
                 val cookies = parseCookieHeader(trimmed)
                 if (cookies.isEmpty()) {
-                    throw IllegalArgumentException("no valid cookie pairs found")
+                    throw IllegalArgumentException("未找到有效的 Cookie 键值对")
                 }
                 client.importEditCookies(cookies, true)
             }
@@ -365,7 +365,7 @@ internal class BilibiliPollService(
             restoreCookies(previousCookiesJson)
             PublisherLoginResult(
                 status = PublisherLoginStatus.FAILED,
-                message = e.message ?: "login failed",
+                message = e.message ?: "登录失败",
             )
         }
     }
@@ -384,7 +384,7 @@ internal class BilibiliPollService(
         return PublisherQrLoginChallenge(
             qrContent = url,
             expiresAtEpochSeconds = System.currentTimeMillis() / 1000 + QR_EXPIRES_SECONDS,
-            message = "waiting for Bilibili app scan confirmation",
+            message = "请使用 Bilibili App 扫码并确认登录",
         )
     }
 
@@ -393,29 +393,29 @@ internal class BilibiliPollService(
         return when (status) {
             QrCodeLoginStatus.SUCCESS -> PublisherLoginResult(
                 status = PublisherLoginStatus.SUCCESS,
-                message = resolvedMessage.ifBlank { "login success" },
+                message = resolvedMessage.ifBlank { "登录成功" },
             )
             QrCodeLoginStatus.EXPIRED -> PublisherLoginResult(
                 status = PublisherLoginStatus.EXPIRED,
-                message = resolvedMessage.ifBlank { "QR code expired" },
+                message = resolvedMessage.ifBlank { "二维码已过期" },
             )
             QrCodeLoginStatus.SCANNED -> PublisherLoginResult(
                 status = PublisherLoginStatus.PENDING,
-                message = resolvedMessage.ifBlank { "QR code scanned, waiting for confirmation" },
+                message = resolvedMessage.ifBlank { "已扫码，等待确认" },
             )
             QrCodeLoginStatus.WAITING -> PublisherLoginResult(
                 status = PublisherLoginStatus.PENDING,
-                message = resolvedMessage.ifBlank { "waiting for QR code scan" },
+                message = resolvedMessage.ifBlank { "等待扫码" },
             )
             QrCodeLoginStatus.UNKNOWN -> PublisherLoginResult(
                 status = PublisherLoginStatus.FAILED,
-                message = resolvedMessage.ifBlank { "Bilibili QR login failed: code=$code" },
+                message = resolvedMessage.ifBlank { "Bilibili 二维码登录失败：code=$code" },
             )
         }
     }
 
     private fun Throwable.toQrFailureResult(): PublisherLoginResult {
-        val reason = message ?: "QR code login failed"
+        val reason = message ?: "二维码登录失败"
         val status = if (reason.contains("失效") || reason.contains("超时") || reason.contains("expired", ignoreCase = true)) {
             PublisherLoginStatus.EXPIRED
         } else {
@@ -460,7 +460,7 @@ internal class BilibiliPollService(
                 connection.requestMethod = "GET"
                 connection.connectTimeout = timeoutMs
                 connection.readTimeout = timeoutMs
-                connection.setRequestProperty("User-Agent", USER_AGENT)
+                //connection.setRequestProperty("User-Agent", USER_AGENT)
 
                 val statusCode = connection.responseCode
                 if (statusCode in HTTP_REDIRECT_RANGE) {

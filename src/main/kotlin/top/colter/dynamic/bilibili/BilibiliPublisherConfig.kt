@@ -19,7 +19,7 @@ public data class BilibiliPublisherConfig(
 public object BilibiliPublisherConfigForm {
     public val spec: ConfigFormSpec = ConfigFormSpec(
         title = "Bilibili 动态源",
-        description = "Bilibili 轮询、补发、关注分组、短链解析和登录 Cookie 设置。",
+        description = "Bilibili 轮询、补发、关注分组、短链接解析和登录 Cookie 设置。",
         fields = listOf(
             ConfigFieldSpec(
                 path = "pollingIntervalMs",
@@ -61,14 +61,14 @@ public object BilibiliPublisherConfigForm {
             ),
             ConfigFieldSpec(
                 path = "shortUrlResolveTimeoutMs",
-                label = "短链解析超时（毫秒）",
+                label = "短链接解析超时（毫秒）",
                 type = ConfigFieldType.NUMBER,
                 section = "链接",
                 min = 1,
             ),
             ConfigFieldSpec(
                 path = "cookiesJson",
-                label = "Cookies JSON",
+                label = "登录 Cookie（JSON）",
                 type = ConfigFieldType.SECRET,
                 section = "登录",
                 secret = true,
@@ -92,11 +92,11 @@ public object BilibiliPublisherConfigForm {
     )
 
     public fun validate(config: BilibiliPublisherConfig) {
-        require(config.pollingIntervalMs >= 1_000) { "pollingIntervalMs must be at least 1000" }
-        require(config.fetchLimit >= 1) { "fetchLimit must be at least 1" }
-        require(config.requestIntervalMs >= 0) { "requestIntervalMs must not be negative" }
-        require(config.replayWindowHours >= 0) { "replayWindowHours must not be negative" }
-        require(config.shortUrlResolveTimeoutMs >= 1) { "shortUrlResolveTimeoutMs must be at least 1" }
+        require(config.pollingIntervalMs >= 1_000) { "轮询间隔不能小于 1000 毫秒" }
+        require(config.fetchLimit >= 1) { "每次拉取数量不能小于 1" }
+        require(config.requestIntervalMs >= 0) { "请求间隔不能为负数" }
+        require(config.replayWindowHours >= 0) { "补发时间窗口不能为负数" }
+        require(config.shortUrlResolveTimeoutMs >= 1) { "短链接解析超时不能小于 1 毫秒" }
         require(config.liveStatusBatchSize >= 1) { "直播状态批量查询数量不能小于 1" }
     }
 }
