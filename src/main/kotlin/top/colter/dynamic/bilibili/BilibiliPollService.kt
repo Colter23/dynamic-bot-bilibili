@@ -186,10 +186,9 @@ internal class BilibiliPollService(
         return BilibiliPublisherSnapshot(
             userId = info.mid.toString(),
             name = info.name,
-            official = info.official?.title?.takeIf { it.isNotBlank() }
-                ?: info.official?.desc?.takeIf { it.isNotBlank() },
+            official = info.official?.type.toString(),
             faceUrl = info.face.url,
-            headerUrl = null,
+            headerUrl = info.header.url,
             pendantUrl = info.pendant?.image?.url?.takeIf { it.isNotBlank() },
         )
     }
@@ -483,6 +482,6 @@ internal class BilibiliPollService(
         private const val QR_EXPIRES_SECONDS: Long = 180
         private const val MAX_SHORT_URL_REDIRECTS: Int = 5
         private const val USER_AGENT: String = "dynamic-bot/0.0.3"
-private val HTTP_REDIRECT_RANGE: IntRange = 300..399
+        private val HTTP_REDIRECT_RANGE: IntRange = 300..399
     }
 }
