@@ -5,6 +5,6 @@ mainClass: top.colter.dynamic.bilibili.BilibiliPublisherPlugin
 capabilities:
   - DYNAMIC_SOURCE
   - LINK_RESOLVER
-apiVersion: 2.2.0
+apiVersion: 2.3.0
 description: Bilibili publisher plugin with polling and subscription dispatch.
 author: dynamic-bot
