@@ -573,7 +573,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
 
         return LiveStatusUpdate(
             platform = BILIBILI_PLATFORM,
-            publisher = publisher,
+            publisher = publisher.toSnapshot(),
             roomId = current.roomId.ifBlank { previous.roomId },
             time = eventTime,
             title = current.title.ifBlank { previous.title },

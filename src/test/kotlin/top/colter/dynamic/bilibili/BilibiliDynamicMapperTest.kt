@@ -22,8 +22,14 @@ import top.colter.bilibili.data.dynamic.type.AdditionalType
 import top.colter.bilibili.data.dynamic.type.MajorType
 import top.colter.bilibili.data.dynamic.type.OriginDynamicType
 import top.colter.bilibili.data.dynamic.type.RichTextType
+import top.colter.dynamic.core.data.DynamicAttachmentDisplay
+import top.colter.dynamic.core.data.DynamicCardAttachment
 import top.colter.dynamic.core.data.DynamicContentNodeEmoji
-import top.colter.dynamic.core.data.DynamicContentNodeLink
+import top.colter.dynamic.core.data.DynamicContentNodeTag
+import top.colter.dynamic.core.data.DynamicImageAttachment
+import top.colter.dynamic.core.data.DynamicReferenceKind
+import top.colter.dynamic.core.data.DynamicTagAttachment
+import top.colter.dynamic.core.data.DynamicVideoAttachment
 import top.colter.dynamic.core.data.LazyImage as CoreLazyImage
 import top.colter.dynamic.core.data.Publisher
 import top.colter.dynamic.core.data.PublisherType
@@ -95,12 +101,13 @@ class BilibiliDynamicMapperTest {
         assertEquals(123L, mapped.time)
         assertEquals("hello [ok]#topic#", mapped.content?.text)
         assertIs<DynamicContentNodeEmoji>(mapped.content?.contentNodes?.get(1))
-        val topic = assertIs<DynamicContentNodeLink>(mapped.content?.contentNodes?.get(2))
+        val topic = assertIs<DynamicContentNodeTag>(mapped.content?.contentNodes?.get(2))
         assertEquals("https://search.bilibili.com/all?keyword=topic", topic.url)
-        assertEquals("https://example.com/pic.png", mapped.media?.pics?.single()?.pic?.uri)
-        assertEquals("42", mapped.stats?.like)
-        assertEquals("12", mapped.stats?.comment)
-        assertEquals("2k", mapped.stats?.forward)
+        val imageAttachment = mapped.attachments.filterIsInstance<DynamicImageAttachment>().single()
+        assertEquals("https://example.com/pic.png", imageAttachment.images.single().image.uri)
+        assertEquals("42", mapped.metric("like"))
+        assertEquals("12", mapped.metric("comment"))
+        assertEquals("2k", mapped.metric("forward"))
     }
 
     @Test
@@ -166,13 +173,24 @@ class BilibiliDynamicMapperTest {
 
         val mapped = assertNotNull(mapper.map(source, fallbackPublisher()))
 
-        assertEquals("BV123", mapped.media?.video?.id)
-        assertEquals("https://www.bilibili.com/video/BV123", mapped.media?.video?.link)
-        assertEquals("additional_ugc", mapped.media?.smallCard?.type)
-        assertEquals("related", mapped.additional?.card?.id)
-        assertEquals("66", mapped.additional?.tags?.id)
-        assertEquals("article", mapped.origin?.media?.card?.type)
-        assertEquals("88", mapped.origin?.publisher?.externalId)
+        val video = mapped.attachments.filterIsInstance<DynamicVideoAttachment>().single()
+        assertEquals("BV123", video.id)
+        assertEquals("https://www.bilibili.com/video/BV123", video.link)
+        val smallCard = mapped.attachments
+            .filterIsInstance<DynamicCardAttachment>()
+            .single { it.display == DynamicAttachmentDisplay.SMALL_CARD }
+        assertEquals("additional_ugc", smallCard.cardType)
+        val topic = mapped.attachments.filterIsInstance<DynamicTagAttachment>().single()
+        assertEquals("66", topic.id)
+        assertEquals("topic", topic.text)
+
+        val mappedOrigin = mapped.references.single { it.kind == DynamicReferenceKind.ORIGIN }.update
+        val originCard = mappedOrigin?.attachments
+            .orEmpty()
+            .filterIsInstance<DynamicCardAttachment>()
+            .single()
+        assertEquals("article", originCard.cardType)
+        assertEquals("88", mappedOrigin?.publisher?.externalId)
     }
 
     private fun dynamic(
@@ -215,5 +233,9 @@ class BilibiliDynamicMapperTest {
             createTime = 0,
             createUser = 0,
         )
+    }
+
+    private fun top.colter.dynamic.core.data.Dynamic.metric(key: String): String? {
+        return metrics.firstOrNull { it.key == key }?.display
     }
 }
