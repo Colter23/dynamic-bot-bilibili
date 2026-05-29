@@ -1,35 +1,53 @@
 package top.colter.dynamic.bilibili
 
 import java.util.concurrent.ConcurrentHashMap
-import top.colter.dynamic.core.data.PublisherCursor
 import top.colter.dynamic.core.data.PublisherLiveStatus
-import top.colter.dynamic.core.repository.PublisherCursorRepository
+import top.colter.dynamic.core.data.SourceCursor
 import top.colter.dynamic.core.repository.PublisherLiveStatusRepository
+import top.colter.dynamic.core.repository.SourceCursorRepository
+
+internal const val BILIBILI_DYNAMIC_SOURCE_KEY: String = "dynamic-feed"
+internal const val BILIBILI_DYNAMIC_UPDATE_TYPE: String = "dynamic"
+internal const val BILIBILI_LIVE_SOURCE_KEY: String = "live-status"
+internal const val BILIBILI_LIVE_UPDATE_TYPE: String = "live"
 
 internal interface BilibiliCursorStore {
-    fun get(publisherId: Int): PublisherCursor?
+    fun get(publisherId: Int): SourceCursor?
 
-    fun ensureBaseline(publisherId: Int, timestamp: Long): PublisherCursor
+    fun ensureBaseline(publisherId: Int, timestamp: Long): SourceCursor
 
-    fun markSeen(publisherId: Int, dynamicId: String, timestamp: Long): PublisherCursor
+    fun markSeen(publisherId: Int, dynamicId: String, timestamp: Long): SourceCursor
 }
 
 internal class DatabaseBilibiliCursorStore : BilibiliCursorStore {
-    private val cache: MutableMap<Int, PublisherCursor> = ConcurrentHashMap()
+    private val cache: MutableMap<Int, SourceCursor> = ConcurrentHashMap()
 
-    override fun get(publisherId: Int): PublisherCursor? {
+    override fun get(publisherId: Int): SourceCursor? {
         cache[publisherId]?.let { return it }
-        return PublisherCursorRepository.findByPublisherId(publisherId)?.also { cache[publisherId] = it }
+        return SourceCursorRepository
+            .find(publisherId, BILIBILI_DYNAMIC_SOURCE_KEY, BILIBILI_DYNAMIC_UPDATE_TYPE)
+            ?.also { cache[publisherId] = it }
     }
 
-    override fun ensureBaseline(publisherId: Int, timestamp: Long): PublisherCursor {
-        val updated = PublisherCursorRepository.ensureBaseline(publisherId, timestamp)
+    override fun ensureBaseline(publisherId: Int, timestamp: Long): SourceCursor {
+        val updated = SourceCursorRepository.ensureBaseline(
+            publisherId = publisherId,
+            sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
+            updateType = BILIBILI_DYNAMIC_UPDATE_TYPE,
+            timestamp = timestamp,
+        )
         cache[publisherId] = updated
         return updated
     }
 
-    override fun markSeen(publisherId: Int, dynamicId: String, timestamp: Long): PublisherCursor {
-        val updated = PublisherCursorRepository.markSeen(publisherId, dynamicId, timestamp)
+    override fun markSeen(publisherId: Int, dynamicId: String, timestamp: Long): SourceCursor {
+        val updated = SourceCursorRepository.markSeen(
+            publisherId = publisherId,
+            sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
+            updateType = BILIBILI_DYNAMIC_UPDATE_TYPE,
+            updateKey = dynamicId,
+            timestamp = timestamp,
+        )
         cache[publisherId] = updated
         return updated
     }
@@ -46,7 +64,10 @@ internal class DatabaseBilibiliLiveStatusStore : BilibiliLiveStatusStore {
 
     override fun get(publisherId: Int): PublisherLiveStatus? {
         cache[publisherId]?.let { return it }
-        return PublisherLiveStatusRepository.findByPublisherId(publisherId)?.also { cache[publisherId] = it }
+        return PublisherLiveStatusRepository
+            .findByPublisherId(publisherId)
+            .maxByOrNull { it.lastObservedAtEpochSeconds }
+            ?.also { cache[publisherId] = it }
     }
 
     override fun save(state: PublisherLiveStatus): PublisherLiveStatus {

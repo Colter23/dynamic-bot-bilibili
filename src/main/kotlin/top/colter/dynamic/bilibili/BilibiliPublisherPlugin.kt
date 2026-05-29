@@ -10,17 +10,22 @@ import top.colter.dynamic.core.config.DefaultConfigService
 import top.colter.dynamic.core.config.loadOrCreate
 import top.colter.dynamic.core.config.save
 import top.colter.dynamic.core.data.EntityState
-import top.colter.dynamic.core.data.LazyImage
 import top.colter.dynamic.core.data.LiveChange
+import top.colter.dynamic.core.data.LivePayload
 import top.colter.dynamic.core.data.LiveStatus
-import top.colter.dynamic.core.data.LiveStatusUpdate
+import top.colter.dynamic.core.data.MediaKind
+import top.colter.dynamic.core.data.MediaRef
+import top.colter.dynamic.core.data.PlatformCapability
 import top.colter.dynamic.core.data.PlatformDescriptor
-import top.colter.dynamic.core.data.PlatformKind
 import top.colter.dynamic.core.data.Publisher
-import top.colter.dynamic.core.data.PublisherCursor
+import top.colter.dynamic.core.data.PublisherKey
 import top.colter.dynamic.core.data.PublisherLiveStatus
 import top.colter.dynamic.core.data.PublisherProfile
-import top.colter.dynamic.core.data.PublisherType
+import top.colter.dynamic.core.data.PublisherKind
+import top.colter.dynamic.core.data.SourceCursor
+import top.colter.dynamic.core.data.SourceUpdate
+import top.colter.dynamic.core.data.UpdateKey
+import top.colter.dynamic.core.data.UpdateOperation
 import top.colter.dynamic.core.data.hasSeen
 import top.colter.dynamic.core.data.replayLowerBoundAtEpochSeconds
 import top.colter.dynamic.core.event.SourceUpdateEvent
@@ -200,15 +205,13 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     override suspend fun fetchPublisherProfile(userId: String): PublisherProfile? {
         val snapshot = pollService.fetchPublisherProfile(userId) ?: return null
         return PublisherProfile(
-            platformId = platformId,
-            externalId = snapshot.userId,
-            type = PublisherType.USER,
+            key = PublisherKey.of(platformId, PublisherKind.USER, snapshot.userId),
             name = snapshot.name,
             official = snapshot.official,
             state = EntityState.ACTIVE,
-            face = LazyImage(snapshot.faceUrl),
-            header = snapshot.headerUrl?.let(::LazyImage),
-            pendant = snapshot.pendantUrl?.let(::LazyImage),
+            avatar = MediaRef(snapshot.faceUrl, MediaKind.AVATAR),
+            banner = snapshot.headerUrl?.let { MediaRef(it, MediaKind.COVER) },
+            pendant = snapshot.pendantUrl?.let { MediaRef(it, MediaKind.AVATAR) },
         )
     }
 
@@ -229,7 +232,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     }
 
     override suspend fun onSubscriptionChanged(event: SubscriptionChangedEvent) {
-        if (!event.publisher.platformId.equals(platformId, ignoreCase = true)) return
+        if (!event.publisher.platformId.value.equals(platformId, ignoreCase = true)) return
 
         when (event.changeType) {
             SubscriptionChangeType.SUBSCRIBED -> handleSubscribed(event)
@@ -263,7 +266,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             )
         }
 
-        val source = runCatching { pollService.fetchDynamicDetail(parsedLink.dynamicId) }
+        val source = runCatching { pollService.fetchDynamicDetail(parsedLink.updateId) }
             .getOrElse { error ->
                 return DynamicLinkResolution.Failed(
                     parsedLink = parsedLink,
@@ -273,13 +276,13 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             }
             ?: return DynamicLinkResolution.Failed(
                 parsedLink = parsedLink,
-                reason = "未找到Bilibili动态: ${parsedLink.dynamicId}",
+                reason = "未找到Bilibili动态: ${parsedLink.updateId}",
             )
 
         val dynamic = mapper.map(source, fallbackPublisher())
             ?: return DynamicLinkResolution.Failed(
                 parsedLink = parsedLink,
-                reason = "Bilibili动态映射失败: ${parsedLink.dynamicId}",
+                reason = "Bilibili动态映射失败: ${parsedLink.updateId}",
             )
 
         return DynamicLinkResolution.Success(parsedLink, dynamic)
@@ -357,12 +360,12 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                 return@publisherLoop
             }
 
-            var cursor: PublisherCursor = initialCursor
+            var cursor: SourceCursor = initialCursor
             publisherDynamics
                 .asReversed()
                 .forEach dynamicLoop@{ raw ->
                     val dynamicId = raw.id.toString()
-                    if (raw.time <= cursor.lastSeenAt || cursor.hasSeen(dynamicId)) {
+                    if (raw.time <= cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) {
                         return@dynamicLoop
                     }
 
@@ -438,7 +441,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                 .asReversed()
                 .forEach dynamicLoop@{ raw ->
                     val dynamicId = raw.id.toString()
-                    if (raw.time <= cursor.lastSeenAt || cursor.hasSeen(dynamicId)) {
+                    if (raw.time <= cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) {
                         return@dynamicLoop
                     }
                     cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
@@ -525,7 +528,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         val title = snapshot?.title?.takeIf { it.isNotBlank() }
             ?: previous?.title
             ?: publisher.name
-        val cover = snapshot?.coverUrl?.let(::LazyImage) ?: previous?.cover
+        val cover = snapshot?.coverUrl?.let { MediaRef(it, MediaKind.COVER) } ?: previous?.cover
         val area = snapshot?.area?.takeIf { it.isNotBlank() } ?: previous?.area
         val startedAt = if (status == LiveStatus.OPEN) {
             snapshot?.startedAtEpochSeconds
@@ -552,7 +555,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         previous: PublisherLiveStatus?,
         current: PublisherLiveStatus,
         observedAt: Long,
-    ): LiveStatusUpdate? {
+    ): SourceUpdate? {
         if (previous == null) return null
 
         val previousOpen = previous.status == LiveStatus.OPEN
@@ -570,21 +573,32 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             LiveChange.STARTED -> startedAt ?: observedAt
             LiveChange.ENDED -> endedAt ?: observedAt
         }
+        val roomId = current.roomId.ifBlank { previous.roomId }
+        val title = current.title.ifBlank { previous.title }
 
-        return LiveStatusUpdate(
-            platform = BILIBILI_PLATFORM,
+        return SourceUpdate(
+            key = UpdateKey(
+                platformId = BILIBILI_PLATFORM.id,
+                updateType = change.updateType,
+                externalId = "$roomId:$eventTime",
+                publisherKey = publisher.key,
+            ),
+            operation = UpdateOperation.STATE_CHANGED,
             publisher = publisher.toSnapshot(),
-            roomId = current.roomId.ifBlank { previous.roomId },
-            time = eventTime,
-            title = current.title.ifBlank { previous.title },
-            area = current.area ?: previous.area,
-            cover = current.cover ?: previous.cover,
-            link = liveLink(current.roomId.ifBlank { previous.roomId }),
-            status = current.status,
-            previousStatus = previous.status,
-            change = change,
-            startedAt = startedAt,
-            endedAt = endedAt,
+            occurredAtEpochSeconds = eventTime,
+            observedAtEpochSeconds = observedAt,
+            link = liveLink(roomId),
+            payload = LivePayload(
+                roomId = roomId,
+                title = title,
+                area = current.area ?: previous.area,
+                cover = current.cover ?: previous.cover,
+                status = current.status,
+                previousStatus = previous.status,
+                change = change,
+                startedAtEpochSeconds = startedAt,
+                endedAtEpochSeconds = endedAt,
+            ),
         )
     }
 
@@ -638,7 +652,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             dynamicsByPublisher[target.userId].orEmpty().forEach dynamicLoop@{ raw ->
                 if (raw.time < target.lowerBound) return@dynamicLoop
                 val dynamicId = raw.id.toString()
-                if (raw.time <= cursor.lastSeenAt || cursor.hasSeen(dynamicId)) return@dynamicLoop
+                if (raw.time <= cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) return@dynamicLoop
 
                 val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
                 SourceUpdateEvent(source = pluginId, update = dynamic).broadcast()
@@ -743,7 +757,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     private suspend fun handleSubscribed(event: SubscriptionChangedEvent) {
         val publisherId = event.publisher.id
         val snapshot = SubscriptionRepository.findActivePublisherWithSubscribersById(publisherId)
-        if (snapshot == null || !snapshot.publisher.platformId.equals(platformId, ignoreCase = true)) {
+        if (snapshot == null || !snapshot.publisher.platformId.value.equals(platformId, ignoreCase = true)) {
             synchronized(publisherLock) {
                 publishers = publishers - publisherId
             }
@@ -769,7 +783,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         val publisherId = event.publisher.id
         val snapshot = SubscriptionRepository.findActivePublisherWithSubscribersById(publisherId)
         synchronized(publisherLock) {
-            publishers = if (snapshot == null || !snapshot.publisher.platformId.equals(platformId, ignoreCase = true)) {
+            publishers = if (snapshot == null || !snapshot.publisher.platformId.value.equals(platformId, ignoreCase = true)) {
                 publishers - publisherId
             } else {
                 publishers + (snapshot.publisher.id to snapshot.publisher)
@@ -875,7 +889,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
 
         return ParsedDynamicLink(
             platformId = platformId,
-            dynamicId = dynamicId,
+            updateId = dynamicId,
             normalizedUrl = dynamicLink(dynamicId),
             sourceUrl = inputUrl,
         )
@@ -925,11 +939,9 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     private fun fallbackPublisher(): Publisher {
         return Publisher(
             id = 0,
-            platformId = platformId,
-            type = PublisherType.USER,
-            externalId = "",
+            key = PublisherKey.of(platformId, PublisherKind.USER, "unknown"),
             name = "",
-            face = LazyImage(""),
+            avatar = MediaRef("", MediaKind.AVATAR),
             createTime = 0,
             createUser = 0,
         )
@@ -938,7 +950,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     private data class ReplayTarget(
         val publisher: Publisher,
         val userId: Long,
-        val cursor: PublisherCursor,
+        val cursor: SourceCursor,
         val lowerBound: Long,
     )
 
@@ -946,12 +958,12 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         private const val BILIBILI_DYNAMIC_HOME: String = "https://t.bilibili.com"
         private const val BILIBILI_HOME: String = "https://www.bilibili.com"
         private const val BILIBILI_LIVE_HOME: String = "https://live.bilibili.com"
-        private val BILIBILI_PLATFORM: PlatformDescriptor = PlatformDescriptor(
+        private val BILIBILI_PLATFORM: PlatformDescriptor = PlatformDescriptor.of(
             id = "bilibili",
-            name = "Bilibili",
-            homepage = BILIBILI_HOME,
+            displayName = "Bilibili",
+            homepageUri = BILIBILI_HOME,
             iconUri = "$BILIBILI_HOME/favicon.ico",
-            kind = PlatformKind.PUBLISHER,
+            capabilities = setOf(PlatformCapability.PUBLISHER_SOURCE, PlatformCapability.LINK_RESOLVER),
         )
     }
 }
