@@ -12,7 +12,6 @@ import top.colter.bilibili.api.getNewDynamic
 import top.colter.bilibili.api.getGroupList
 import top.colter.bilibili.api.getUserInfo
 import top.colter.bilibili.api.modifyGroupUsers
-import top.colter.bilibili.api.isFollow
 import top.colter.bilibili.api.createGroup
 import top.colter.bilibili.auth.qrCode
 import top.colter.bilibili.client.BiliAuthClient
@@ -35,6 +34,7 @@ import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import top.colter.dynamic.core.data.LiveStatus
 import kotlinx.coroutines.CancellationException
+import top.colter.bilibili.api.relation
 import java.net.HttpURLConnection
 import java.net.URI
 
@@ -223,7 +223,7 @@ internal class BilibiliPollService(
 
     override suspend fun queryFollowState(userId: String): FollowState {
         val uid = userId.toLongOrNull() ?: return FollowState.UNSUPPORTED
-        val relation = client.isFollow(uid)
+        val relation = client.relation(uid)
         applyRequestDelay()
         return if (relation.attribute > 0) {
             FollowState.FOLLOWING
