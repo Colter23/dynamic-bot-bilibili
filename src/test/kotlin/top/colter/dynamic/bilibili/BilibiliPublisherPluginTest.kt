@@ -32,13 +32,12 @@ import top.colter.dynamic.core.data.SourceCursor
 import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
-import top.colter.dynamic.core.config.DefaultConfigService
+import top.colter.dynamic.core.config.YamlConfigService
 import top.colter.dynamic.core.event.EventBus
 import top.colter.dynamic.core.event.Listener
 import top.colter.dynamic.core.event.SourceUpdateEvent
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
 import top.colter.dynamic.core.event.SubscriptionChangeType
-import top.colter.dynamic.core.event.register
 import top.colter.dynamic.core.link.DynamicLinkResolution
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
@@ -56,7 +55,6 @@ import top.colter.dynamic.core.repository.SubscriptionRepository
 import top.colter.dynamic.core.task.TaskScheduler
 import top.colter.dynamic.core.task.TaskStatus
 import kotlin.io.path.createTempDirectory
-import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -64,8 +62,8 @@ import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-private fun BilibiliPublisherPlugin.init() {
-    runBlocking { onLoad(testPluginContext()) }
+private fun BilibiliPublisherPlugin.init(eventBus: EventBus = EventBus()) {
+    runBlocking { onLoad(testPluginContext(eventBus)) }
 }
 
 private fun BilibiliPublisherPlugin.start() {
@@ -76,7 +74,7 @@ private fun BilibiliPublisherPlugin.stop() {
     runBlocking { onStop() }
 }
 
-private fun testPluginContext(): PluginContext {
+private fun testPluginContext(eventBus: EventBus = EventBus()): PluginContext {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     return PluginContext(
         pluginId = "bilibili-publisher",
@@ -86,19 +84,18 @@ private fun testPluginContext(): PluginContext {
             version = "test",
             mainClass = BilibiliPublisherPlugin::class.java.name,
         ),
-        eventBus = EventBus.global,
-        configService = DefaultConfigService,
+        eventBus = eventBus,
+        configService = YamlConfigService(createTempDirectory("dynamic-bot-bilibili-config")),
         scope = scope,
         taskScheduler = TaskScheduler(scope),
     )
 }
 
-class BilibiliPublisherPluginTest {
+private fun testScheduler(): TaskScheduler {
+    return TaskScheduler(CoroutineScope(SupervisorJob() + Dispatchers.Default))
+}
 
-    @AfterTest
-    fun cleanup() {
-        EventBus.global.shutdown()
-    }
+class BilibiliPublisherPluginTest {
 
     @Test
     fun `fetchPublisherInfo should map gateway snapshot to publisher info`() = runBlocking {
@@ -164,7 +161,7 @@ class BilibiliPublisherPluginTest {
         val parsed = plugin.parseDynamicLink("https://t.bilibili.com/1205230877720707077?spm_id_from=demo")
 
         requireNotNull(parsed)
-        assertEquals("bilibili", parsed.platformId)
+        assertEquals("bilibili", parsed.platformId.value)
         assertEquals("1205230877720707077", parsed.updateId)
         assertEquals("https://t.bilibili.com/1205230877720707077", parsed.normalizedUrl)
     }
@@ -234,7 +231,7 @@ class BilibiliPublisherPluginTest {
 
     @Test
     fun `start should skip detection task when login check fails`() {
-        val scheduler = TaskScheduler()
+        val scheduler = testScheduler()
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
@@ -367,7 +364,7 @@ class BilibiliPublisherPluginTest {
 
     @Test
     fun `followGroupName should create group on startup and add followed publisher to it`() = runBlocking {
-        val scheduler = TaskScheduler()
+        val scheduler = testScheduler()
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.NOT_FOLLOWING,
@@ -398,7 +395,7 @@ class BilibiliPublisherPluginTest {
 
     @Test
     fun `blank followGroupName should skip group api calls`() = runBlocking {
-        val scheduler = TaskScheduler()
+        val scheduler = testScheduler()
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.NOT_FOLLOWING,
@@ -425,7 +422,7 @@ class BilibiliPublisherPluginTest {
 
     @Test
     fun `loginByCookie should persist cookies and start detection task after startup skip`() = runBlocking {
-        val scheduler = TaskScheduler()
+        val scheduler = testScheduler()
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
@@ -488,7 +485,7 @@ class BilibiliPublisherPluginTest {
 
     @Test
     fun `loginByQrCode should persist cookies and start detection task after startup skip`() = runBlocking {
-        val scheduler = TaskScheduler()
+        val scheduler = testScheduler()
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
@@ -528,7 +525,7 @@ class BilibiliPublisherPluginTest {
 
     @Test
     fun `start and stop should manage detection task scheduler`() {
-        val scheduler = TaskScheduler()
+        val scheduler = testScheduler()
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
@@ -553,7 +550,7 @@ class BilibiliPublisherPluginTest {
 
     @Test
     fun `subscription event should add publisher baseline and trigger immediate detect`() = runBlocking {
-        val scheduler = TaskScheduler()
+        val scheduler = testScheduler()
         val cursorStore = InMemoryCursorStore()
         val gateway = FakeGateway(
             snapshot = null,
@@ -567,8 +564,9 @@ class BilibiliPublisherPluginTest {
             taskScheduler = scheduler,
             cursorStore = cursorStore,
         )
+        val eventBus = EventBus()
 
-        plugin.init()
+        plugin.init(eventBus)
         plugin.start()
         withTimeout(3_000) {
             while ((scheduler.snapshot("bilibili-detect")?.runCount ?: 0L) == 0L) {
@@ -590,11 +588,13 @@ class BilibiliPublisherPluginTest {
         gateway.setDynamicPages(mapOf(1 to dynamicPage(false, rawDynamic)))
 
         val received = CompletableDeferred<SourceUpdateEvent>()
-        object : Listener<SourceUpdateEvent> {
-            override suspend fun onMessage(event: SourceUpdateEvent) {
-                if (!received.isCompleted) received.complete(event)
-            }
-        }.register<SourceUpdateEvent>()
+        eventBus.subscribe(
+            object : Listener<SourceUpdateEvent> {
+                override suspend fun onMessage(event: SourceUpdateEvent) {
+                    if (!received.isCompleted) received.complete(event)
+                }
+            },
+        )
 
         plugin.onSubscriptionChanged(
             SubscriptionChangedEvent(
@@ -607,7 +607,7 @@ class BilibiliPublisherPluginTest {
         )
 
         val dynamicEvent = withTimeout(3_000) { received.await() }
-        assertNull(dynamicEvent.targetOverride)
+        assertNull(dynamicEvent.deliveryTarget)
         assertEquals(rawDynamic.id.toString(), dynamicEvent.update.key.externalId)
         assertEquals(listOf(1), gateway.requestedPages)
         assertEquals(
@@ -633,15 +633,18 @@ class BilibiliPublisherPluginTest {
             config = testConfig(pollingIntervalMs = 25),
             liveStatusStore = liveStore,
         )
+        val eventBus = EventBus()
         seedPublisherAndSubscriber()
         val received = kotlinx.coroutines.channels.Channel<SourceUpdateEvent>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-        object : Listener<SourceUpdateEvent> {
-            override suspend fun onMessage(event: SourceUpdateEvent) {
-                received.send(event)
-            }
-        }.register<SourceUpdateEvent>()
+        eventBus.subscribe(
+            object : Listener<SourceUpdateEvent> {
+                override suspend fun onMessage(event: SourceUpdateEvent) {
+                    received.send(event)
+                }
+            },
+        )
 
-        plugin.init()
+        plugin.init(eventBus)
         plugin.start()
         assertEquals(LiveStatus.CLOSE, liveStore.get(1)?.status)
         assertNull(withTimeoutOrNull(100) { received.receive() })
@@ -674,15 +677,18 @@ class BilibiliPublisherPluginTest {
             initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
         )
         val plugin = testPlugin(gateway, config = testConfig(pollingIntervalMs = 25))
+        val eventBus = EventBus()
         seedPublisherAndSubscriber()
         val received = CompletableDeferred<SourceUpdateEvent>()
-        object : Listener<SourceUpdateEvent> {
-            override suspend fun onMessage(event: SourceUpdateEvent) {
-                if (!received.isCompleted) received.complete(event)
-            }
-        }.register<SourceUpdateEvent>()
+        eventBus.subscribe(
+            object : Listener<SourceUpdateEvent> {
+                override suspend fun onMessage(event: SourceUpdateEvent) {
+                    if (!received.isCompleted) received.complete(event)
+                }
+            },
+        )
 
-        plugin.init()
+        plugin.init(eventBus)
         plugin.start()
         gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.ROUND)))
 
@@ -791,7 +797,7 @@ class BilibiliPublisherPluginTest {
         gateway: BilibiliPlatformGateway,
         config: BilibiliPublisherConfig = testConfig(),
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
-        taskScheduler: TaskScheduler = TaskScheduler(),
+        taskScheduler: TaskScheduler = testScheduler(),
         cursorStore: BilibiliCursorStore = InMemoryCursorStore(),
         liveStatusStore: BilibiliLiveStatusStore = InMemoryLiveStatusStore(),
     ): BilibiliPublisherPlugin {

@@ -5,9 +5,7 @@ import kotlinx.coroutines.sync.withLock
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.dynamic.core.config.ConfigApplyResult
 import top.colter.dynamic.core.config.ConfigurablePlugin
-import top.colter.dynamic.core.config.DefaultConfigService
 import top.colter.dynamic.core.config.loadOrCreate
-import top.colter.dynamic.core.config.save
 import top.colter.dynamic.core.data.EntityState
 import top.colter.dynamic.core.data.LivePayload
 import top.colter.dynamic.core.data.LiveStatus
@@ -76,7 +74,7 @@ public class BilibiliPublisherPlugin() :
     override val configFormSpec = BilibiliPublisherConfigForm.spec
 
     private var loadConfig: (String) -> BilibiliPublisherConfig = { pluginId ->
-        DefaultConfigService.loadOrCreate(pluginId) { BilibiliPublisherConfig() }
+        error("插件配置服务尚未初始化：$pluginId")
     }
     private var useContextConfigService: Boolean = true
     private var serviceFactory: (Long) -> BilibiliPlatformGateway = { requestIntervalMs ->
@@ -84,11 +82,9 @@ public class BilibiliPublisherPlugin() :
     }
     private var cursorStoreFactory: () -> BilibiliCursorStore = { DatabaseBilibiliCursorStore() }
     private var liveStatusStoreFactory: () -> BilibiliLiveStatusStore = { DatabaseBilibiliLiveStatusStore() }
-    private var saveConfig: (String, BilibiliPublisherConfig) -> Unit = { id, config ->
-        DefaultConfigService.save(id, config)
-    }
-    private var taskScheduler: TaskScheduler = TaskScheduler()
-    private var eventBus: EventBus = EventBus.global
+    private var saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> }
+    private lateinit var taskScheduler: TaskScheduler
+    private lateinit var eventBus: EventBus
     private var useContextTaskScheduler: Boolean = true
 
     private val followGroupMutex: Mutex = Mutex()
@@ -117,7 +113,7 @@ public class BilibiliPublisherPlugin() :
         cursorStoreFactory: () -> BilibiliCursorStore,
         liveStatusStoreFactory: () -> BilibiliLiveStatusStore = { DatabaseBilibiliLiveStatusStore() },
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
-        taskScheduler: TaskScheduler = TaskScheduler(),
+        taskScheduler: TaskScheduler,
     ) : this() {
         this.loadConfig = loadConfig
         this.useContextConfigService = false
@@ -276,10 +272,10 @@ public class BilibiliPublisherPlugin() :
     }
 
     override suspend fun resolveDynamicLink(parsedLink: ParsedDynamicLink): DynamicLinkResolution {
-        if (!parsedLink.platformId.equals(platformId.value, ignoreCase = true)) {
+        if (parsedLink.platformId != platformId) {
             return DynamicLinkResolution.Failed(
                 parsedLink = parsedLink,
-                reason = "不支持的平台: ${parsedLink.platformId}",
+                reason = "不支持的平台：${parsedLink.platformId.value}",
             )
         }
 
@@ -387,7 +383,7 @@ public class BilibiliPublisherPlugin() :
                     }
 
                     val dynamic = mapper.map(raw, publisher) ?: return@dynamicLoop
-                    eventBus.broadcast(SourceUpdateEvent(source = pluginId, update = dynamic))
+                    eventBus.broadcast(SourceUpdateEvent(sourcePlugin = pluginId, update = dynamic))
                     cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
                 }
         }
@@ -503,7 +499,7 @@ public class BilibiliPublisherPlugin() :
             val update = buildLiveUpdate(publisher, previous, current, now)
             liveStatusStore.save(current)
             update?.let {
-                eventBus.broadcast(SourceUpdateEvent(source = pluginId, update = it))
+                eventBus.broadcast(SourceUpdateEvent(sourcePlugin = pluginId, update = it))
             }
         }
     }
@@ -670,7 +666,7 @@ public class BilibiliPublisherPlugin() :
                 if (raw.time <= cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) return@dynamicLoop
 
                 val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
-                eventBus.broadcast(SourceUpdateEvent(source = pluginId, update = dynamic))
+                eventBus.broadcast(SourceUpdateEvent(sourcePlugin = pluginId, update = dynamic))
                 cursor = cursorStore.markSeen(target.publisher.id, dynamicId, raw.time)
             }
         }
@@ -901,7 +897,7 @@ public class BilibiliPublisherPlugin() :
             ?: return null
 
         return ParsedDynamicLink(
-            platformId = platformId.value,
+            platformId = platformId,
             updateId = dynamicId,
             normalizedUrl = dynamicLink(dynamicId),
             sourceUrl = inputUrl,
