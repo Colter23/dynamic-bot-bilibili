@@ -96,9 +96,8 @@ internal class BilibiliDynamicMapper {
         return fallback.copy(
             key = key,
             name = author.name.takeIfNotBlank() ?: fallbackPublisher.name,
-            official = author.official?.title.takeIfNotBlank()
-                ?: author.official?.desc.takeIfNotBlank()
-                ?: fallbackPublisher.official,
+            official = author.official?.toOfficialBadgeResource()
+                ?: if (author.official == null) fallbackPublisher.official else null,
             avatar = author.face.toCoreImageOrNull(MediaKind.AVATAR) ?: fallbackPublisher.avatar,
             pendant = author.pendant?.image?.toCoreImageOrNull(MediaKind.AVATAR) ?: fallbackPublisher.pendant,
         )

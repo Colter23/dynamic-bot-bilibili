@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import top.colter.bilibili.data.LazyImage as BiliLazyImage
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.BiliDynamicModules
@@ -26,6 +27,8 @@ import top.colter.bilibili.data.dynamic.type.AdditionalType
 import top.colter.bilibili.data.dynamic.type.MajorType
 import top.colter.bilibili.data.dynamic.type.OriginDynamicType
 import top.colter.bilibili.data.dynamic.type.RichTextType
+import top.colter.bilibili.data.user.OfficialVerify
+import top.colter.bilibili.data.user.OfficialVerifyType
 import top.colter.dynamic.core.data.CardAttachment
 import top.colter.dynamic.core.data.DynamicContentNodeEmoji
 import top.colter.dynamic.core.data.DynamicContentNodeTag
@@ -197,6 +200,55 @@ class BilibiliDynamicMapperTest {
         assertEquals("88", mappedOrigin?.publisher?.externalId)
     }
 
+    @Test
+    fun `map should use official badge resource for verified author`() {
+        val source = dynamic(
+            id = "300",
+            type = OriginDynamicType.WORD,
+            dynamic = ModuleDynamic(),
+            author = author(
+                mid = 42,
+                name = "publisher",
+                official = OfficialVerify(type = OfficialVerifyType.INDIVIDUAL),
+            ),
+        )
+
+        val update = assertNotNull(mapper.map(source, fallbackPublisher()))
+
+        assertEquals(BILIBILI_OFFICIAL_BADGE_RESOURCE, update.publisher.official)
+    }
+
+    @Test
+    fun `map should clear official badge when author is not verified`() {
+        val source = dynamic(
+            id = "301",
+            type = OriginDynamicType.WORD,
+            dynamic = ModuleDynamic(),
+            author = author(
+                mid = 42,
+                name = "publisher",
+                official = OfficialVerify(type = OfficialVerifyType.NONE),
+            ),
+        )
+
+        val update = assertNotNull(
+            mapper.map(
+                source,
+                fallbackPublisher(official = BILIBILI_OFFICIAL_BADGE_RESOURCE),
+            )
+        )
+
+        assertNull(update.publisher.official)
+    }
+
+    @Test
+    fun `official badge helper should return null for absent verify`() {
+        val official: OfficialVerify? = null
+
+        assertNull(official.toOfficialBadgeResource())
+        assertNull(OfficialVerify(type = OfficialVerifyType.NONE).toOfficialBadgeResource())
+    }
+
     private fun dynamic(
         id: String,
         type: OriginDynamicType,
@@ -217,20 +269,26 @@ class BilibiliDynamicMapperTest {
         )
     }
 
-    private fun author(mid: Long, name: String): ModuleAuthor {
+    private fun author(
+        mid: Long,
+        name: String,
+        official: OfficialVerify? = null,
+    ): ModuleAuthor {
         return ModuleAuthor(
             mid = mid,
             name = name,
             face = BiliLazyImage("https://example.com/$mid-face.png"),
+            official = official,
             pubTs = 123,
         )
     }
 
-    private fun fallbackPublisher(): Publisher {
+    private fun fallbackPublisher(official: String? = null): Publisher {
         return Publisher(
             id = 1,
             key = PublisherKey.of(platformId = "bilibili", externalId = "42"),
             name = "fallback",
+            official = official,
             avatar = MediaRef("https://example.com/fallback.png", MediaKind.AVATAR),
             createTime = 0,
             createUser = 0,

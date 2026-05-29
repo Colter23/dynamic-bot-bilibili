@@ -421,6 +421,140 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `unfollowPublisher should unfollow when publisher only belongs to bot group`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
+            followRelation = BilibiliFollowRelationSnapshot(
+                userId = "123",
+                following = true,
+                tagIds = setOf(1L),
+            ),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(followGroupName = "Bot关注"),
+        )
+
+        plugin.init()
+        val result = plugin.unfollowPublisher("123")
+
+        assertEquals(FollowActionStatus.FOLLOWED, result.status)
+        assertEquals(listOf("123"), gateway.unfollowedUsers)
+        assertEquals(1, gateway.groupFetchCount)
+        assertTrue(gateway.createdGroupNames.isEmpty())
+    }
+
+    @Test
+    fun `unfollowPublisher should skip when publisher is not in bot group`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
+            followRelation = BilibiliFollowRelationSnapshot(
+                userId = "123",
+                following = true,
+                tagIds = setOf(2L),
+            ),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(followGroupName = "Bot关注"),
+        )
+
+        plugin.init()
+        val result = plugin.unfollowPublisher("123")
+
+        assertEquals(FollowActionStatus.FAILED, result.status)
+        assertTrue(gateway.unfollowedUsers.isEmpty())
+        assertEquals(1, gateway.groupFetchCount)
+    }
+
+    @Test
+    fun `unfollowPublisher should skip when publisher also belongs to other groups`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
+            followRelation = BilibiliFollowRelationSnapshot(
+                userId = "123",
+                following = true,
+                tagIds = setOf(1L, 2L),
+            ),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(followGroupName = "Bot关注"),
+        )
+
+        plugin.init()
+        val result = plugin.unfollowPublisher("123")
+
+        assertEquals(FollowActionStatus.FAILED, result.status)
+        assertTrue(gateway.unfollowedUsers.isEmpty())
+        assertEquals(1, gateway.groupFetchCount)
+    }
+
+    @Test
+    fun `unfollowPublisher should skip unsafe or unavailable relation states`() = runBlocking {
+        val cases = listOf(
+            UnfollowSkipCase(
+                name = "未关注",
+                followGroupName = "Bot关注",
+                initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
+                relation = BilibiliFollowRelationSnapshot("123", following = false, tagIds = setOf(1L)),
+                expectedGroupFetchCount = 1,
+            ),
+            UnfollowSkipCase(
+                name = "未配置分组",
+                followGroupName = "",
+                relation = BilibiliFollowRelationSnapshot("123", following = true, tagIds = setOf(1L)),
+                expectedGroupFetchCount = 0,
+            ),
+            UnfollowSkipCase(
+                name = "分组不存在",
+                followGroupName = "Bot关注",
+                relation = BilibiliFollowRelationSnapshot("123", following = true, tagIds = setOf(1L)),
+                expectedGroupFetchCount = 1,
+            ),
+            UnfollowSkipCase(
+                name = "关系查询失败",
+                followGroupName = "Bot关注",
+                initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
+                relationFailure = IllegalStateException("relation failed"),
+                expectedGroupFetchCount = 1,
+            ),
+        )
+
+        cases.forEach { case ->
+            val gateway = FakeGateway(
+                snapshot = null,
+                followState = FollowState.FOLLOWING,
+                followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+                initialGroups = case.initialGroups,
+                followRelation = case.relation,
+                relationFailure = case.relationFailure,
+            )
+            val plugin = testPlugin(
+                gateway,
+                config = testConfig(followGroupName = case.followGroupName),
+            )
+
+            plugin.init()
+            val result = plugin.unfollowPublisher("123")
+
+            assertEquals(FollowActionStatus.FAILED, result.status, case.name)
+            assertTrue(gateway.unfollowedUsers.isEmpty(), case.name)
+            assertEquals(case.expectedGroupFetchCount, gateway.groupFetchCount, case.name)
+            assertTrue(gateway.createdGroupNames.isEmpty(), case.name)
+        }
+    }
+
+    @Test
     fun `loginByCookie should persist cookies and start detection task after startup skip`() = runBlocking {
         val scheduler = testScheduler()
         val gateway = FakeGateway(
@@ -697,6 +831,107 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `live polling should keep previous open state when batch fails`() = runBlocking {
+        val startedAt = System.currentTimeMillis() / 1000 - 60
+        val liveStore = InMemoryLiveStatusStore(
+            initialStates = mapOf(
+                1 to PublisherLiveStatus(
+                    publisherId = 1,
+                    roomId = "456",
+                    status = LiveStatus.OPEN,
+                    title = "Live title",
+                    area = "Games",
+                    startedAtEpochSeconds = startedAt,
+                    lastObservedAtEpochSeconds = startedAt,
+                )
+            )
+        )
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            failingLiveBatches = setOf(listOf(123L)),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(pollingIntervalMs = 25, liveStatusBatchSize = 1),
+            liveStatusStore = liveStore,
+        )
+        val eventBus = EventBus()
+        seedPublisherAndSubscriber()
+        val received = CompletableDeferred<SourceUpdateEvent>()
+        eventBus.subscribe(
+            object : Listener<SourceUpdateEvent> {
+                override suspend fun onMessage(event: SourceUpdateEvent) {
+                    if (!received.isCompleted) received.complete(event)
+                }
+            },
+        )
+
+        plugin.init(eventBus)
+        plugin.start()
+
+        assertNull(withTimeoutOrNull(200) { received.await() })
+        assertEquals(LiveStatus.OPEN, liveStore.get(1)?.status)
+
+        plugin.stop()
+    }
+
+    @Test
+    fun `live polling should skip failed batches and process successful batches`() = runBlocking {
+        val startedAt = System.currentTimeMillis() / 1000 - 60
+        val liveStore = InMemoryLiveStatusStore()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            initialLiveSnapshots = mapOf(
+                101L to liveSnapshot(LiveStatus.OPEN, startedAt, userId = "101", roomId = "501"),
+                102L to liveSnapshot(LiveStatus.OPEN, startedAt, userId = "102", roomId = "502"),
+            ),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(pollingIntervalMs = 25, liveStatusBatchSize = 1),
+            liveStatusStore = liveStore,
+        )
+        val eventBus = EventBus()
+        val failedPublisher = seedPublisherAndSubscriber(externalId = "101", targetId = "9001").publisher
+        val closedPublisher = seedPublisherAndSubscriber(externalId = "102", targetId = "9002").publisher
+        val received = kotlinx.coroutines.channels.Channel<SourceUpdateEvent>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        eventBus.subscribe(
+            object : Listener<SourceUpdateEvent> {
+                override suspend fun onMessage(event: SourceUpdateEvent) {
+                    received.send(event)
+                }
+            },
+        )
+
+        plugin.init(eventBus)
+        plugin.start()
+        assertEquals(LiveStatus.OPEN, liveStore.get(failedPublisher.id)?.status)
+        assertEquals(LiveStatus.OPEN, liveStore.get(closedPublisher.id)?.status)
+
+        gateway.setFailingLiveBatches(setOf(listOf(101L)))
+        gateway.setLiveSnapshots(
+            mapOf(
+                102L to liveSnapshot(LiveStatus.CLOSE, userId = "102", roomId = "502"),
+            )
+        )
+
+        val endedUpdate = withTimeout(3_000) { received.receive() }.update
+        assertEquals(SourceEventType.LIVE_ENDED, endedUpdate.eventType)
+        assertEquals("102", endedUpdate.publisher.externalId)
+        assertNull(withTimeoutOrNull(150) { received.receive() })
+        assertEquals(LiveStatus.OPEN, liveStore.get(failedPublisher.id)?.status)
+        assertEquals(LiveStatus.CLOSE, liveStore.get(closedPublisher.id)?.status)
+
+        plugin.stop()
+    }
+
+    @Test
     fun `live polling should request status in configured batches`() {
         val gateway = FakeGateway(
             snapshot = null,
@@ -926,13 +1161,21 @@ class BilibiliPublisherPluginTest {
         private val exportedCookiesJson: String = "",
         private val dynamicDetails: Map<String, BiliDynamic> = emptyMap(),
         private val shortUrlExpansions: Map<String, String?> = emptyMap(),
+        private val followRelation: BilibiliFollowRelationSnapshot? = null,
+        private val relationFailure: Throwable? = null,
+        private val unfollowActionResult: FollowActionResult = FollowActionResult(
+            FollowActionStatus.FOLLOWED,
+            "unfollowed",
+        ),
         initialDynamicPages: Map<Int, BiliDynamicList> = emptyMap(),
         initialGroups: List<BiliGroup> = emptyList(),
         initialLiveSnapshots: Map<Long, BilibiliLiveSnapshot> = emptyMap(),
+        failingLiveBatches: Set<List<Long>> = emptySet(),
     ) : BilibiliPlatformGateway {
         private val groups: MutableList<BiliGroup> = initialGroups.toMutableList()
         private val dynamicPages: MutableMap<Int, BiliDynamicList> = initialDynamicPages.toMutableMap()
         private val liveSnapshots: MutableMap<Long, BilibiliLiveSnapshot> = initialLiveSnapshots.toMutableMap()
+        private val liveBatchFailures: MutableSet<List<Long>> = failingLiveBatches.map { it.toList() }.toMutableSet()
         private var nextGroupId: Long = (groups.maxOfOrNull { it.tid } ?: 0L) + 1L
 
         val requestedPages: MutableList<Int> = mutableListOf()
@@ -943,6 +1186,7 @@ class BilibiliPublisherPluginTest {
         val addedGroupUsers: MutableList<GroupUsersCall> = mutableListOf()
         val requestedDetails: MutableList<String> = mutableListOf()
         val expandedShortUrls: MutableList<String> = mutableListOf()
+        val unfollowedUsers: MutableList<String> = mutableListOf()
 
         override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
             requestedPages.add(page)
@@ -968,12 +1212,20 @@ class BilibiliPublisherPluginTest {
         override suspend fun fetchLiveStatusBatch(uids: Iterable<Long>): List<BilibiliLiveSnapshot> {
             val requested = uids.toList()
             requestedLiveBatches.add(requested)
+            if (requested in liveBatchFailures) {
+                error("live status failed: $requested")
+            }
             return requested.mapNotNull { liveSnapshots[it] }
         }
 
         fun setLiveSnapshots(next: Map<Long, BilibiliLiveSnapshot>) {
             liveSnapshots.clear()
             liveSnapshots.putAll(next)
+        }
+
+        fun setFailingLiveBatches(next: Set<List<Long>>) {
+            liveBatchFailures.clear()
+            liveBatchFailures.addAll(next.map { it.toList() })
         }
 
         override suspend fun expandShortUrl(url: String, timeoutMs: Long): String? {
@@ -986,6 +1238,20 @@ class BilibiliPublisherPluginTest {
         override suspend fun queryFollowState(userId: String): FollowState = followState
 
         override suspend fun followPublisher(userId: String): FollowActionResult = followActionResult
+
+        override suspend fun fetchFollowRelation(userId: String): BilibiliFollowRelationSnapshot? {
+            relationFailure?.let { throw it }
+            return followRelation ?: BilibiliFollowRelationSnapshot(
+                userId = userId,
+                following = followState == FollowState.FOLLOWING,
+                tagIds = emptySet(),
+            )
+        }
+
+        override suspend fun unfollowPublisher(userId: String): FollowActionResult {
+            unfollowedUsers.add(userId)
+            return unfollowActionResult
+        }
 
         override suspend fun fetchFollowGroups(): List<BiliGroup> {
             groupFetchCount += 1
@@ -1100,10 +1366,15 @@ class BilibiliPublisherPluginTest {
         }
     }
 
-    private fun liveSnapshot(status: LiveStatus, startedAt: Long? = null): BilibiliLiveSnapshot {
+    private fun liveSnapshot(
+        status: LiveStatus,
+        startedAt: Long? = null,
+        userId: String = "123",
+        roomId: String = "456",
+    ): BilibiliLiveSnapshot {
         return BilibiliLiveSnapshot(
-            userId = "123",
-            roomId = "456",
+            userId = userId,
+            roomId = roomId,
             status = status,
             title = "Live title",
             area = "Games",
@@ -1126,6 +1397,15 @@ class BilibiliPublisherPluginTest {
     private data class GroupUsersCall(
         val fids: List<Long>,
         val tagIds: List<Long>,
+    )
+
+    private data class UnfollowSkipCase(
+        val name: String,
+        val followGroupName: String,
+        val initialGroups: List<BiliGroup> = emptyList(),
+        val relation: BilibiliFollowRelationSnapshot? = null,
+        val relationFailure: Throwable? = null,
+        val expectedGroupFetchCount: Int,
     )
 
     private companion object {

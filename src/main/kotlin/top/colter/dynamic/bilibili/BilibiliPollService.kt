@@ -35,6 +35,7 @@ import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import top.colter.dynamic.core.data.LiveStatus
 import kotlinx.coroutines.CancellationException
 import top.colter.bilibili.api.relation
+import top.colter.bilibili.api.unfollow
 import java.net.HttpURLConnection
 import java.net.URI
 
@@ -55,6 +56,12 @@ internal data class BilibiliLiveSnapshot(
     val area: String? = null,
     val coverUrl: String? = null,
     val startedAtEpochSeconds: Long? = null,
+)
+
+internal data class BilibiliFollowRelationSnapshot(
+    val userId: String,
+    val following: Boolean,
+    val tagIds: Set<Long>,
 )
 
 internal interface BilibiliPlatformGateway {
@@ -79,6 +86,17 @@ internal interface BilibiliPlatformGateway {
     suspend fun queryFollowState(userId: String): FollowState
 
     suspend fun followPublisher(userId: String): FollowActionResult
+
+    suspend fun fetchFollowRelation(userId: String): BilibiliFollowRelationSnapshot? {
+        throw UnsupportedOperationException("不支持关注关系接口")
+    }
+
+    suspend fun unfollowPublisher(userId: String): FollowActionResult {
+        return FollowActionResult(
+            status = FollowActionStatus.UNSUPPORTED,
+            message = "不支持取消关注",
+        )
+    }
 
     suspend fun fetchFollowGroups(): List<BiliGroup> {
         throw UnsupportedOperationException("不支持关注分组接口")
@@ -186,7 +204,7 @@ internal class BilibiliPollService(
         return BilibiliPublisherSnapshot(
             userId = info.mid.toString(),
             name = info.name,
-            official = info.official?.type.toString(),
+            official = info.official.toOfficialBadgeResource(),
             faceUrl = info.face.url,
             headerUrl = info.header.url,
             pendantUrl = info.pendant?.image?.url?.takeIf { it.isNotBlank() },
@@ -222,14 +240,23 @@ internal class BilibiliPollService(
     }
 
     override suspend fun queryFollowState(userId: String): FollowState {
-        val uid = userId.toLongOrNull() ?: return FollowState.UNSUPPORTED
-        val relation = client.relation(uid)
-        applyRequestDelay()
-        return if (relation.attribute > 0) {
+        val relation = fetchFollowRelation(userId) ?: return FollowState.UNSUPPORTED
+        return if (relation.following) {
             FollowState.FOLLOWING
         } else {
             FollowState.NOT_FOLLOWING
         }
+    }
+
+    override suspend fun fetchFollowRelation(userId: String): BilibiliFollowRelationSnapshot? {
+        val uid = userId.toLongOrNull() ?: return null
+        val relation = client.relation(uid)
+        applyRequestDelay()
+        return BilibiliFollowRelationSnapshot(
+            userId = relation.mid.takeIf { it > 0 }?.toString() ?: uid.toString(),
+            following = relation.attribute.isFollowingRelation(),
+            tagIds = relation.tag.orEmpty().map { it.toLong() }.toSet(),
+        )
     }
 
     override suspend fun followPublisher(userId: String): FollowActionResult {
@@ -247,6 +274,20 @@ internal class BilibiliPollService(
                 FollowActionResult(FollowActionStatus.FOLLOWED)
             }
         }
+    }
+
+    override suspend fun unfollowPublisher(userId: String): FollowActionResult {
+        val uid = userId.toLongOrNull()
+            ?: return FollowActionResult(
+                FollowActionStatus.FAILED,
+                "无效的 Bilibili 用户 ID：$userId",
+            )
+        client.unfollow(uid)
+        applyRequestDelay()
+        return FollowActionResult(
+            FollowActionStatus.FOLLOWED,
+            "已取消关注 Bilibili 用户：$userId",
+        )
     }
 
     override suspend fun fetchFollowGroups(): List<BiliGroup> {
@@ -482,6 +523,11 @@ internal class BilibiliPollService(
         private const val QR_EXPIRES_SECONDS: Long = 180
         private const val MAX_SHORT_URL_REDIRECTS: Int = 5
         private const val USER_AGENT: String = "dynamic-bot/0.0.3"
+        private const val FOLLOWING_ATTRIBUTE: Int = 2
         private val HTTP_REDIRECT_RANGE: IntRange = 300..399
+
+        private fun Int.isFollowingRelation(): Boolean {
+            return (this and FOLLOWING_ATTRIBUTE) != 0
+        }
     }
 }

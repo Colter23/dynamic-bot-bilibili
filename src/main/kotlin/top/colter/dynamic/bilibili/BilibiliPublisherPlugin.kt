@@ -240,6 +240,50 @@ public class BilibiliPublisherPlugin() :
         return result
     }
 
+    override suspend fun unfollowPublisher(userId: String): FollowActionResult {
+        val groupId = findExistingFollowGroupId()
+            ?: return skipAutoUnfollow(userId, "未配置或未找到 Bot 关注分组")
+
+        val relation = runCatching {
+            pollService.fetchFollowRelation(userId)
+        }.onFailure {
+            logger.warn(it) {
+                "Bilibili 自动取消关注关系查询失败：uid=$userId"
+            }
+        }.getOrNull() ?: return skipAutoUnfollow(userId, "关注关系查询失败")
+
+        if (!relation.following) {
+            return skipAutoUnfollow(userId, "当前账号未关注该 UP 主")
+        }
+        if (relation.tagIds != setOf(groupId)) {
+            return skipAutoUnfollow(userId, "UP 主不只属于 Bot 关注分组：tagIds=${relation.tagIds}，botGroupId=$groupId")
+        }
+
+        val result = runCatching {
+            pollService.unfollowPublisher(userId)
+        }.onFailure {
+            logger.warn(it) {
+                "Bilibili 自动取消关注失败：uid=$userId，groupId=$groupId"
+            }
+        }.getOrElse { error ->
+            return FollowActionResult(
+                FollowActionStatus.FAILED,
+                error.message ?: "Bilibili 自动取消关注失败",
+            )
+        }
+
+        if (result.status == FollowActionStatus.FOLLOWED) {
+            logger.info {
+                "Bilibili 自动取消关注完成：uid=$userId，groupId=$groupId"
+            }
+        } else {
+            logger.warn {
+                "Bilibili 自动取消关注未完成：uid=$userId，status=${result.status}，message=${result.message}"
+            }
+        }
+        return result
+    }
+
     override suspend fun checkLoginState(): PublisherLoginResult {
         return pollService.checkLoginState()
     }
@@ -468,13 +512,15 @@ public class BilibiliPublisherPlugin() :
         if (publisherSnapshot.isEmpty()) return
 
         val now = System.currentTimeMillis() / 1000
-        val liveByUid = fetchLiveSnapshotsByUid(publisherSnapshot.values)
+        val liveFetch = fetchLiveSnapshotsByUid(publisherSnapshot.values)
         publisherSnapshot.values.forEach { publisher ->
             val uid = publisher.externalId.toLongOrNull() ?: return@forEach
+            if (uid in liveFetch.unavailableUids) return@forEach
+            val snapshot = liveFetch.snapshotsByUid[uid] ?: return@forEach
             val previous = liveStatusStore.get(publisher.id)
             val current = buildLiveState(
                 publisher = publisher,
-                snapshot = liveByUid[uid],
+                snapshot = snapshot,
                 previous = previous,
                 observedAt = now,
             )
@@ -486,13 +532,15 @@ public class BilibiliPublisherPlugin() :
         if (!config.liveDetectionEnabled || publisherSnapshot.isEmpty()) return
 
         val now = System.currentTimeMillis() / 1000
-        val liveByUid = fetchLiveSnapshotsByUid(publisherSnapshot.values)
+        val liveFetch = fetchLiveSnapshotsByUid(publisherSnapshot.values)
         publisherSnapshot.values.forEach { publisher ->
             val uid = publisher.externalId.toLongOrNull() ?: return@forEach
+            if (uid in liveFetch.unavailableUids) return@forEach
+            val snapshot = liveFetch.snapshotsByUid[uid] ?: return@forEach
             val previous = liveStatusStore.get(publisher.id)
             val current = buildLiveState(
                 publisher = publisher,
-                snapshot = liveByUid[uid],
+                snapshot = snapshot,
                 previous = previous,
                 observedAt = now,
             )
@@ -504,14 +552,15 @@ public class BilibiliPublisherPlugin() :
         }
     }
 
-    private suspend fun fetchLiveSnapshotsByUid(publishers: Collection<Publisher>): Map<Long, BilibiliLiveSnapshot> {
+    private suspend fun fetchLiveSnapshotsByUid(publishers: Collection<Publisher>): LiveSnapshotFetchResult {
         val uids = publishers
             .mapNotNull { it.externalId.toLongOrNull() }
             .distinct()
-        if (uids.isEmpty()) return emptyMap()
+        if (uids.isEmpty()) return LiveSnapshotFetchResult()
 
         val batchSize = config.liveStatusBatchSize.coerceAtLeast(1)
         val result = linkedMapOf<Long, BilibiliLiveSnapshot>()
+        val unavailable = linkedSetOf<Long>()
         uids.chunked(batchSize).forEach { batch ->
             val snapshots = runCatching {
                 pollService.fetchLiveStatusBatch(batch)
@@ -519,13 +568,28 @@ public class BilibiliPublisherPlugin() :
                 logger.warn(it) {
                     "Bilibili 直播状态拉取失败：uids=$batch"
                 }
-            }.getOrDefault(emptyList())
+                unavailable.addAll(batch)
+            }.getOrNull() ?: return@forEach
+            val returnedUids = linkedSetOf<Long>()
+            val requestedUids = batch.toSet()
             snapshots.forEach { snapshot ->
                 val uid = snapshot.userId.toLongOrNull() ?: return@forEach
+                if (uid !in requestedUids) return@forEach
                 result[uid] = snapshot
+                returnedUids.add(uid)
+            }
+            val missingUids = batch.filterNot { it in returnedUids }
+            if (missingUids.isNotEmpty()) {
+                unavailable.addAll(missingUids)
+                logger.debug {
+                    "Bilibili 直播状态返回缺失，已保留旧状态：uids=$missingUids"
+                }
             }
         }
-        return result
+        return LiveSnapshotFetchResult(
+            snapshotsByUid = result,
+            unavailableUids = unavailable,
+        )
     }
 
     private fun buildLiveState(
@@ -694,13 +758,25 @@ public class BilibiliPublisherPlugin() :
 
         return followGroupMutex.withLock {
             followGroupId?.let { return@withLock it }
-            val resolved = resolveFollowGroupId(groupName)
+            val resolved = resolveFollowGroupId(groupName, createIfMissing = true)
             followGroupId = resolved
             resolved
         }
     }
 
-    private suspend fun resolveFollowGroupId(groupName: String): Long? {
+    private suspend fun findExistingFollowGroupId(): Long? {
+        val groupName = normalizedFollowGroupName() ?: return null
+        followGroupId?.let { return it }
+
+        return followGroupMutex.withLock {
+            followGroupId?.let { return@withLock it }
+            val resolved = resolveFollowGroupId(groupName, createIfMissing = false)
+            followGroupId = resolved
+            resolved
+        }
+    }
+
+    private suspend fun resolveFollowGroupId(groupName: String, createIfMissing: Boolean): Long? {
         val existingGroups = runCatching {
             pollService.fetchFollowGroups()
         }.onFailure {
@@ -714,6 +790,13 @@ public class BilibiliPublisherPlugin() :
                 "复用 Bilibili 关注分组：name=$groupName，groupId=${matched.tid}"
             }
             return matched.tid
+        }
+
+        if (!createIfMissing) {
+            logger.info {
+                "Bilibili 关注分组未找到，已跳过创建：name=$groupName"
+            }
+            return null
         }
 
         runCatching {
@@ -750,11 +833,23 @@ public class BilibiliPublisherPlugin() :
         return config.followGroupName.trim().takeIf { it.isNotBlank() }
     }
 
+    private fun skipAutoUnfollow(userId: String, reason: String): FollowActionResult {
+        logger.info {
+            "Bilibili 自动取消关注已跳过：uid=$userId，原因=$reason"
+        }
+        return FollowActionResult(
+            FollowActionStatus.FAILED,
+            "已跳过自动取消关注：$reason",
+        )
+    }
+
     private suspend fun ensureLiveBaseline(publisher: Publisher) {
         if (!config.liveDetectionEnabled || liveStatusStore.get(publisher.id) != null) return
         val uid = publisher.externalId.toLongOrNull() ?: return
         val now = System.currentTimeMillis() / 1000
-        val snapshot = fetchLiveSnapshotsByUid(listOf(publisher))[uid]
+        val liveFetch = fetchLiveSnapshotsByUid(listOf(publisher))
+        if (uid in liveFetch.unavailableUids) return
+        val snapshot = liveFetch.snapshotsByUid[uid] ?: return
         liveStatusStore.save(
             buildLiveState(
                 publisher = publisher,
@@ -961,6 +1056,11 @@ public class BilibiliPublisherPlugin() :
         val userId: Long,
         val cursor: SourceCursor,
         val lowerBound: Long,
+    )
+
+    private data class LiveSnapshotFetchResult(
+        val snapshotsByUid: Map<Long, BilibiliLiveSnapshot> = emptyMap(),
+        val unavailableUids: Set<Long> = emptySet(),
     )
 
     private companion object {
