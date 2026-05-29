@@ -1,6 +1,9 @@
 package top.colter.dynamic.bilibili
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -29,7 +32,8 @@ import top.colter.dynamic.core.data.SourceCursor
 import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
-import top.colter.dynamic.core.event.EventManger
+import top.colter.dynamic.core.config.DefaultConfigService
+import top.colter.dynamic.core.event.EventBus
 import top.colter.dynamic.core.event.Listener
 import top.colter.dynamic.core.event.SourceUpdateEvent
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
@@ -43,6 +47,8 @@ import top.colter.dynamic.core.plugin.PublisherLoginAccount
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
+import top.colter.dynamic.core.plugin.PluginContext
+import top.colter.dynamic.core.plugin.PluginDescriptor
 import top.colter.dynamic.core.repository.PersistenceManager
 import top.colter.dynamic.core.repository.PublisherRepository
 import top.colter.dynamic.core.repository.SubscriberRepository
@@ -58,11 +64,40 @@ import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+private fun BilibiliPublisherPlugin.init() {
+    runBlocking { onLoad(testPluginContext()) }
+}
+
+private fun BilibiliPublisherPlugin.start() {
+    runBlocking { onStart() }
+}
+
+private fun BilibiliPublisherPlugin.stop() {
+    runBlocking { onStop() }
+}
+
+private fun testPluginContext(): PluginContext {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    return PluginContext(
+        pluginId = "bilibili-publisher",
+        descriptor = PluginDescriptor(
+            id = "bilibili-publisher",
+            name = "Bilibili Publisher Plugin",
+            version = "test",
+            mainClass = BilibiliPublisherPlugin::class.java.name,
+        ),
+        eventBus = EventBus.global,
+        configService = DefaultConfigService,
+        scope = scope,
+        taskScheduler = TaskScheduler(scope),
+    )
+}
+
 class BilibiliPublisherPluginTest {
 
     @AfterTest
     fun cleanup() {
-        EventManger.shutdown()
+        EventBus.global.shutdown()
     }
 
     @Test
@@ -242,7 +277,7 @@ class BilibiliPublisherPluginTest {
         val seeded = seedPublisherAndSubscriber()
         val existingCursor = SourceCursor(
             publisherId = seeded.publisher.id,
-            sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
+            sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
             eventType = SourceEventType.DYNAMIC_CREATED,
             lastSeenUpdateKey = dynamicIdFor(now - 5_000L, 99),
             lastSeenAtEpochSeconds = now - 5_000L,
@@ -295,7 +330,7 @@ class BilibiliPublisherPluginTest {
         val seeded = seedPublisherAndSubscriber()
         val existingCursor = SourceCursor(
             publisherId = seeded.publisher.id,
-            sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
+            sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
             eventType = SourceEventType.DYNAMIC_CREATED,
             lastSeenUpdateKey = dynamicIdFor(now - 5_000L, 99),
             lastSeenAtEpochSeconds = now - 5_000L,
@@ -1024,7 +1059,7 @@ class BilibiliPublisherPluginTest {
             }
             val updated = SourceCursor(
                 publisherId = publisherId,
-                sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
+                sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
                 eventType = SourceEventType.DYNAMIC_CREATED,
                 lastSeenUpdateKey = dynamicId,
                 lastSeenAtEpochSeconds = timestamp,

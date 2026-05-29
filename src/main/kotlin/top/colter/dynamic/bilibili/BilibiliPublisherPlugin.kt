@@ -1,6 +1,5 @@
 package top.colter.dynamic.bilibili
 
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import top.colter.bilibili.data.dynamic.BiliDynamic
@@ -14,6 +13,7 @@ import top.colter.dynamic.core.data.LivePayload
 import top.colter.dynamic.core.data.LiveStatus
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
+import top.colter.dynamic.core.data.PlatformId
 import top.colter.dynamic.core.data.PlatformCapability
 import top.colter.dynamic.core.data.PlatformDescriptor
 import top.colter.dynamic.core.data.Publisher
@@ -27,21 +27,25 @@ import top.colter.dynamic.core.data.SourceUpdate
 import top.colter.dynamic.core.data.UpdateKey
 import top.colter.dynamic.core.data.hasSeen
 import top.colter.dynamic.core.data.replayLowerBoundAtEpochSeconds
+import top.colter.dynamic.core.event.EventBus
 import top.colter.dynamic.core.event.SourceUpdateEvent
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
 import top.colter.dynamic.core.event.SubscriptionChangeType
-import top.colter.dynamic.core.event.broadcast
 import top.colter.dynamic.core.link.DynamicLinkResolution
 import top.colter.dynamic.core.link.DynamicLinkResolver
 import top.colter.dynamic.core.link.ParsedDynamicLink
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
-import top.colter.dynamic.core.plugin.PlatformPublisherPlugin
+import top.colter.dynamic.core.plugin.PluginContext
+import top.colter.dynamic.core.plugin.PublisherFollowPlugin
 import top.colter.dynamic.core.plugin.PublisherLoginMethod
+import top.colter.dynamic.core.plugin.PublisherLoginProvider
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
+import top.colter.dynamic.core.plugin.PublisherLookupPlugin
+import top.colter.dynamic.core.plugin.PublisherSourcePlugin
 import top.colter.dynamic.core.repository.SubscriptionRepository
 import top.colter.dynamic.core.task.TaskDefinition
 import top.colter.dynamic.core.task.TaskSchedule
@@ -52,13 +56,20 @@ import kotlin.time.Duration.Companion.milliseconds
 
 private val logger = loggerFor<BilibiliPublisherPlugin>()
 
-public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkResolver, ConfigurablePlugin<BilibiliPublisherConfig> {
-    private val pluginId: String = "bilibili-publisher"
+public class BilibiliPublisherPlugin() :
+    PublisherSourcePlugin,
+    PublisherLookupPlugin,
+    PublisherFollowPlugin,
+    PublisherLoginProvider,
+    DynamicLinkResolver,
+    ConfigurablePlugin<BilibiliPublisherConfig> {
+    private var pluginId: String = "bilibili-publisher"
     private val detectTaskId: String = "bilibili-detect"
 
-    override val platformId: String = "bilibili"
+    override val platformId: PlatformId = PlatformId.of("bilibili")
 
-    override val configId: String = pluginId
+    override val configId: String
+        get() = pluginId
     override val configName: String = "Bilibili 动态源"
     override val configDescription: String = "Bilibili 轮询与登录配置。"
     override val configClass = BilibiliPublisherConfig::class
@@ -67,6 +78,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     private var loadConfig: (String) -> BilibiliPublisherConfig = { pluginId ->
         DefaultConfigService.loadOrCreate(pluginId) { BilibiliPublisherConfig() }
     }
+    private var useContextConfigService: Boolean = true
     private var serviceFactory: (Long) -> BilibiliPlatformGateway = { requestIntervalMs ->
         BilibiliPollService(requestIntervalMs)
     }
@@ -76,6 +88,8 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         DefaultConfigService.save(id, config)
     }
     private var taskScheduler: TaskScheduler = TaskScheduler()
+    private var eventBus: EventBus = EventBus.global
+    private var useContextTaskScheduler: Boolean = true
 
     private val followGroupMutex: Mutex = Mutex()
     private val detectMutex: Mutex = Mutex()
@@ -106,11 +120,13 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         taskScheduler: TaskScheduler = TaskScheduler(),
     ) : this() {
         this.loadConfig = loadConfig
+        this.useContextConfigService = false
         this.serviceFactory = serviceFactory
         this.cursorStoreFactory = cursorStoreFactory
         this.liveStatusStoreFactory = liveStatusStoreFactory
         this.saveConfig = saveConfig
         this.taskScheduler = taskScheduler
+        this.useContextTaskScheduler = false
     }
 
     override val supportedLoginMethods: Set<PublisherLoginMethod> = setOf(
@@ -118,7 +134,16 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         PublisherLoginMethod.QR_CODE,
     )
 
-    override fun init() {
+    override suspend fun onLoad(context: PluginContext) {
+        pluginId = context.pluginId
+        eventBus = context.eventBus
+        if (useContextTaskScheduler) {
+            taskScheduler = context.taskScheduler
+        }
+        if (useContextConfigService) {
+            loadConfig = { id -> context.configService.loadOrCreate(id) { BilibiliPublisherConfig() } }
+            saveConfig = { id, next -> context.configService.save(id, next) }
+        }
         config = loadConfig(pluginId)
         pollService = serviceFactory(config.requestIntervalMs)
         mapper = BilibiliDynamicMapper()
@@ -134,15 +159,13 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
 
         importStoredCookies()
         loadActivePublishers()
-        logger.info {
-            "Bilibili 配置已加载：path=${DefaultConfigService.resolvePath(pluginId).toAbsolutePath()}"
-        }
+        logger.info { "Bilibili config loaded: pluginId=$pluginId" }
     }
 
-    override fun start() {
-        val loginResult = runBlocking { pollService.checkLoginState() }
+    override suspend fun onStart() {
+        val loginResult = pollService.checkLoginState()
         if (loginResult.status == PublisherLoginStatus.SUCCESS) {
-            val taskStarted = runBlocking { bootstrapLoggedInState(allowReplay = true) }
+            val taskStarted = bootstrapLoggedInState(allowReplay = true)
             logger.info {
                 "Bilibili 轮询已就绪：账号=${loginResult.account?.name ?: loginResult.account?.userId ?: "未知"}，任务新启动=$taskStarted"
             }
@@ -153,14 +176,9 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         }
     }
 
-    override fun stop() {
-        runBlocking {
-            taskScheduler.stop(detectTaskId)
-        }
+    override suspend fun onStop() {
+        taskScheduler.stop(detectTaskId)
         logger.info { "Bilibili 轮询已停止" }
-    }
-
-    override fun cleanup() {
     }
 
     override fun currentConfig(): BilibiliPublisherConfig {
@@ -204,7 +222,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     override suspend fun fetchPublisherInfo(userId: String): PublisherInfo? {
         val snapshot = pollService.fetchPublisherSnapshot(userId) ?: return null
         return PublisherInfo(
-            key = PublisherKey.of(platformId, PublisherKind.USER, snapshot.userId),
+            key = PublisherKey.of(platformId.value, PublisherKind.USER, snapshot.userId),
             name = snapshot.name,
             official = snapshot.official,
             state = EntityState.ACTIVE,
@@ -231,7 +249,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     }
 
     override suspend fun onSubscriptionChanged(event: SubscriptionChangedEvent) {
-        if (!event.publisher.platformId.value.equals(platformId, ignoreCase = true)) return
+        if (event.publisher.platformId != platformId) return
 
         when (event.changeType) {
             SubscriptionChangeType.SUBSCRIBED -> handleSubscribed(event)
@@ -258,7 +276,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     }
 
     override suspend fun resolveDynamicLink(parsedLink: ParsedDynamicLink): DynamicLinkResolution {
-        if (!parsedLink.platformId.equals(platformId, ignoreCase = true)) {
+        if (!parsedLink.platformId.equals(platformId.value, ignoreCase = true)) {
             return DynamicLinkResolution.Failed(
                 parsedLink = parsedLink,
                 reason = "不支持的平台: ${parsedLink.platformId}",
@@ -369,7 +387,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                     }
 
                     val dynamic = mapper.map(raw, publisher) ?: return@dynamicLoop
-                    SourceUpdateEvent(source = pluginId, update = dynamic).broadcast()
+                    eventBus.broadcast(SourceUpdateEvent(source = pluginId, update = dynamic))
                     cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
                 }
         }
@@ -485,7 +503,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             val update = buildLiveUpdate(publisher, previous, current, now)
             liveStatusStore.save(current)
             update?.let {
-                SourceUpdateEvent(source = pluginId, update = it).broadcast()
+                eventBus.broadcast(SourceUpdateEvent(source = pluginId, update = it))
             }
         }
     }
@@ -652,7 +670,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                 if (raw.time <= cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) return@dynamicLoop
 
                 val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
-                SourceUpdateEvent(source = pluginId, update = dynamic).broadcast()
+                eventBus.broadcast(SourceUpdateEvent(source = pluginId, update = dynamic))
                 cursor = cursorStore.markSeen(target.publisher.id, dynamicId, raw.time)
             }
         }
@@ -754,7 +772,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     private suspend fun handleSubscribed(event: SubscriptionChangedEvent) {
         val publisherId = event.publisher.id
         val snapshot = SubscriptionRepository.findActivePublisherWithSubscribersById(publisherId)
-        if (snapshot == null || !snapshot.publisher.platformId.value.equals(platformId, ignoreCase = true)) {
+        if (snapshot == null || snapshot.publisher.platformId != platformId) {
             synchronized(publisherLock) {
                 publishers = publishers - publisherId
             }
@@ -780,7 +798,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         val publisherId = event.publisher.id
         val snapshot = SubscriptionRepository.findActivePublisherWithSubscribersById(publisherId)
         synchronized(publisherLock) {
-            publishers = if (snapshot == null || !snapshot.publisher.platformId.value.equals(platformId, ignoreCase = true)) {
+            publishers = if (snapshot == null || snapshot.publisher.platformId != platformId) {
                 publishers - publisherId
             } else {
                 publishers + (snapshot.publisher.id to snapshot.publisher)
@@ -789,7 +807,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     }
 
     private fun loadActivePublishers() {
-        val loaded = SubscriptionRepository.findActivePublishersWithSubscribersBySourcePlatform(platformId)
+        val loaded = SubscriptionRepository.findActivePublishersWithSubscribersBySourcePlatform(platformId.value)
             .keys
             .associateBy { it.id }
         synchronized(publisherLock) {
@@ -800,12 +818,10 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         }
     }
 
-    private fun importStoredCookies() {
+    private suspend fun importStoredCookies() {
         if (config.cookiesJson.isBlank()) return
         runCatching {
-            runBlocking {
-                pollService.importCookiesJson(config.cookiesJson)
-            }
+            pollService.importCookiesJson(config.cookiesJson)
         }.onFailure {
             logger.warn(it) { "导入 Bilibili 登录信息失败" }
         }
@@ -885,7 +901,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
             ?: return null
 
         return ParsedDynamicLink(
-            platformId = platformId,
+            platformId = platformId.value,
             updateId = dynamicId,
             normalizedUrl = dynamicLink(dynamicId),
             sourceUrl = inputUrl,
@@ -936,7 +952,7 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
     private fun fallbackPublisher(): Publisher {
         return Publisher(
             id = 0,
-            key = PublisherKey.of(platformId, PublisherKind.USER, "unknown"),
+            key = PublisherKey.of(platformId.value, PublisherKind.USER, "unknown"),
             name = "",
             avatar = MediaRef("", MediaKind.AVATAR),
             createTime = 0,

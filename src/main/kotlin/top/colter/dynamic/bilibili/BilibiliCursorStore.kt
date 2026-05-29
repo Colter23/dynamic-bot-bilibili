@@ -7,7 +7,7 @@ import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.repository.PublisherLiveStatusRepository
 import top.colter.dynamic.core.repository.SourceCursorRepository
 
-internal const val BILIBILI_DYNAMIC_SOURCE_KEY: String = "dynamic-feed"
+internal const val BILIBILI_DYNAMIC_FEED_KEY: String = "dynamic-feed"
 internal const val BILIBILI_LIVE_SOURCE_KEY: String = "live-status"
 
 internal interface BilibiliCursorStore {
@@ -24,14 +24,14 @@ internal class DatabaseBilibiliCursorStore : BilibiliCursorStore {
     override fun get(publisherId: Int): SourceCursor? {
         cache[publisherId]?.let { return it }
         return SourceCursorRepository
-            .find(publisherId, BILIBILI_DYNAMIC_SOURCE_KEY, SourceEventType.DYNAMIC_CREATED)
+            .find(publisherId, BILIBILI_DYNAMIC_FEED_KEY, SourceEventType.DYNAMIC_CREATED)
             ?.also { cache[publisherId] = it }
     }
 
     override fun ensureBaseline(publisherId: Int, timestamp: Long): SourceCursor {
         val updated = SourceCursorRepository.ensureBaseline(
             publisherId = publisherId,
-            sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
+            sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
             eventType = SourceEventType.DYNAMIC_CREATED,
             timestamp = timestamp,
         )
@@ -42,7 +42,7 @@ internal class DatabaseBilibiliCursorStore : BilibiliCursorStore {
     override fun markSeen(publisherId: Int, dynamicId: String, timestamp: Long): SourceCursor {
         val updated = SourceCursorRepository.markSeen(
             publisherId = publisherId,
-            sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
+            sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
             eventType = SourceEventType.DYNAMIC_CREATED,
             updateKey = dynamicId,
             timestamp = timestamp,
