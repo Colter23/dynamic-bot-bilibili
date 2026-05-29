@@ -25,8 +25,8 @@ import top.colter.dynamic.core.data.SourceUpdate
 import top.colter.dynamic.core.data.UpdateKey
 import top.colter.dynamic.core.data.hasSeen
 import top.colter.dynamic.core.data.replayLowerBoundAtEpochSeconds
-import top.colter.dynamic.core.event.EventBus
-import top.colter.dynamic.core.event.SourceUpdateEvent
+import top.colter.dynamic.core.event.SourceUpdatePublishRequest
+import top.colter.dynamic.core.event.SourceUpdatePublisher
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
 import top.colter.dynamic.core.event.SubscriptionChangeType
 import top.colter.dynamic.core.link.DynamicLinkResolution
@@ -84,7 +84,7 @@ public class BilibiliPublisherPlugin() :
     private var liveStatusStoreFactory: () -> BilibiliLiveStatusStore = { DatabaseBilibiliLiveStatusStore() }
     private var saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> }
     private lateinit var taskScheduler: TaskScheduler
-    private lateinit var eventBus: EventBus
+    private lateinit var sourceUpdatePublisher: SourceUpdatePublisher
     private var useContextTaskScheduler: Boolean = true
 
     private val followGroupMutex: Mutex = Mutex()
@@ -132,7 +132,7 @@ public class BilibiliPublisherPlugin() :
 
     override suspend fun onLoad(context: PluginContext) {
         pluginId = context.pluginId
-        eventBus = context.eventBus
+        sourceUpdatePublisher = context.sourceUpdatePublisher
         if (useContextTaskScheduler) {
             taskScheduler = context.taskScheduler
         }
@@ -155,7 +155,7 @@ public class BilibiliPublisherPlugin() :
 
         importStoredCookies()
         loadActivePublishers()
-        logger.info { "Bilibili config loaded: pluginId=$pluginId" }
+        logger.info { "Bilibili 配置已加载：pluginId=$pluginId" }
     }
 
     override suspend fun onStart() {
@@ -327,19 +327,19 @@ public class BilibiliPublisherPlugin() :
             .getOrElse { error ->
                 return DynamicLinkResolution.Failed(
                     parsedLink = parsedLink,
-                    reason = error.message ?: "获取Bilibili动态详情失败",
+                    reason = error.message ?: "获取 Bilibili 动态详情失败",
                     cause = error,
                 )
             }
             ?: return DynamicLinkResolution.Failed(
                 parsedLink = parsedLink,
-                reason = "未找到Bilibili动态: ${parsedLink.updateId}",
+                reason = "未找到 Bilibili 动态：${parsedLink.updateId}",
             )
 
         val dynamic = mapper.map(source, fallbackPublisher())
             ?: return DynamicLinkResolution.Failed(
                 parsedLink = parsedLink,
-                reason = "Bilibili动态映射失败: ${parsedLink.updateId}",
+                reason = "Bilibili 动态映射失败：${parsedLink.updateId}",
             )
 
         return DynamicLinkResolution.Success(parsedLink, dynamic)
@@ -427,8 +427,9 @@ public class BilibiliPublisherPlugin() :
                     }
 
                     val dynamic = mapper.map(raw, publisher) ?: return@dynamicLoop
-                    eventBus.broadcast(SourceUpdateEvent(sourcePlugin = pluginId, update = dynamic))
-                    cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
+                    if (publishSourceUpdate(dynamic)) {
+                        cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
+                    }
                 }
         }
         detectLiveStatusChanges(publisherSnapshot)
@@ -545,9 +546,8 @@ public class BilibiliPublisherPlugin() :
                 observedAt = now,
             )
             val update = buildLiveUpdate(publisher, previous, current, now)
-            liveStatusStore.save(current)
-            update?.let {
-                eventBus.broadcast(SourceUpdateEvent(sourcePlugin = pluginId, update = it))
+            if (update == null || publishSourceUpdate(update)) {
+                liveStatusStore.save(current)
             }
         }
     }
@@ -730,10 +730,26 @@ public class BilibiliPublisherPlugin() :
                 if (raw.time <= cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) return@dynamicLoop
 
                 val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
-                eventBus.broadcast(SourceUpdateEvent(sourcePlugin = pluginId, update = dynamic))
-                cursor = cursorStore.markSeen(target.publisher.id, dynamicId, raw.time)
+                if (publishSourceUpdate(dynamic)) {
+                    cursor = cursorStore.markSeen(target.publisher.id, dynamicId, raw.time)
+                }
             }
         }
+    }
+
+    private suspend fun publishSourceUpdate(update: SourceUpdate): Boolean {
+        val result = sourceUpdatePublisher.publish(
+            SourceUpdatePublishRequest(
+                sourcePlugin = pluginId,
+                update = update,
+            ),
+        )
+        if (!result.accepted) {
+            logger.warn {
+                "Bilibili 来源更新发布失败，游标暂不推进：update=${update.key.stableValue()}，原因=${result.message}"
+            }
+        }
+        return result.accepted
     }
 
     private suspend fun ensureFollowGroupInitialized() {

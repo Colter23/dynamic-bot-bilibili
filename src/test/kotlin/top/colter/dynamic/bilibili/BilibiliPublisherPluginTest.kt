@@ -34,6 +34,7 @@ import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
 import top.colter.dynamic.core.config.YamlConfigService
 import top.colter.dynamic.core.event.EventBus
+import top.colter.dynamic.core.event.EventBusSourceUpdatePublisher
 import top.colter.dynamic.core.event.Listener
 import top.colter.dynamic.core.event.SourceUpdateEvent
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
@@ -88,6 +89,7 @@ private fun testPluginContext(eventBus: EventBus = EventBus()): PluginContext {
         configService = YamlConfigService(createTempDirectory("dynamic-bot-bilibili-config")),
         scope = scope,
         taskScheduler = TaskScheduler(scope),
+        sourceUpdatePublisher = EventBusSourceUpdatePublisher(eventBus),
     )
 }
 
