@@ -70,7 +70,7 @@ internal interface BilibiliPlatformGateway {
         throw UnsupportedOperationException("不支持短链接解析")
     }
 
-    suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot?
+    suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot?
 
     suspend fun fetchLiveStatusBatch(uids: Iterable<Long>): List<BilibiliLiveSnapshot> {
         throw UnsupportedOperationException("不支持直播状态查询")
@@ -179,7 +179,7 @@ internal class BilibiliPollService(
         }
     }
 
-    override suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot? {
+    override suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot? {
         val uid = userId.toLongOrNull() ?: return null
         val info = client.getUserInfo(uid)
         applyRequestDelay()

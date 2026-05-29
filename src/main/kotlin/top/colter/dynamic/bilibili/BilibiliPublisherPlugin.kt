@@ -10,7 +10,6 @@ import top.colter.dynamic.core.config.DefaultConfigService
 import top.colter.dynamic.core.config.loadOrCreate
 import top.colter.dynamic.core.config.save
 import top.colter.dynamic.core.data.EntityState
-import top.colter.dynamic.core.data.LiveChange
 import top.colter.dynamic.core.data.LivePayload
 import top.colter.dynamic.core.data.LiveStatus
 import top.colter.dynamic.core.data.MediaKind
@@ -20,12 +19,12 @@ import top.colter.dynamic.core.data.PlatformDescriptor
 import top.colter.dynamic.core.data.Publisher
 import top.colter.dynamic.core.data.PublisherKey
 import top.colter.dynamic.core.data.PublisherLiveStatus
-import top.colter.dynamic.core.data.PublisherProfile
+import top.colter.dynamic.core.data.PublisherInfo
 import top.colter.dynamic.core.data.PublisherKind
 import top.colter.dynamic.core.data.SourceCursor
+import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.data.SourceUpdate
 import top.colter.dynamic.core.data.UpdateKey
-import top.colter.dynamic.core.data.UpdateOperation
 import top.colter.dynamic.core.data.hasSeen
 import top.colter.dynamic.core.data.replayLowerBoundAtEpochSeconds
 import top.colter.dynamic.core.event.SourceUpdateEvent
@@ -202,9 +201,9 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         )
     }
 
-    override suspend fun fetchPublisherProfile(userId: String): PublisherProfile? {
-        val snapshot = pollService.fetchPublisherProfile(userId) ?: return null
-        return PublisherProfile(
+    override suspend fun fetchPublisherInfo(userId: String): PublisherInfo? {
+        val snapshot = pollService.fetchPublisherSnapshot(userId) ?: return null
+        return PublisherInfo(
             key = PublisherKey.of(platformId, PublisherKind.USER, snapshot.userId),
             name = snapshot.name,
             official = snapshot.official,
@@ -562,29 +561,28 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
         val currentOpen = current.status == LiveStatus.OPEN
         if (previousOpen == currentOpen) return null
 
-        val change = if (currentOpen) LiveChange.STARTED else LiveChange.ENDED
-        val startedAt = if (change == LiveChange.STARTED) {
+        val eventType = if (currentOpen) SourceEventType.LIVE_STARTED else SourceEventType.LIVE_ENDED
+        val startedAt = if (eventType == SourceEventType.LIVE_STARTED) {
             current.startedAtEpochSeconds ?: observedAt
         } else {
             previous.startedAtEpochSeconds ?: current.startedAtEpochSeconds
         }
-        val endedAt = if (change == LiveChange.ENDED) observedAt else null
-        val eventTime = when (change) {
-            LiveChange.STARTED -> startedAt ?: observedAt
-            LiveChange.ENDED -> endedAt ?: observedAt
+        val endedAt = if (eventType == SourceEventType.LIVE_ENDED) observedAt else null
+        val eventTime = when (eventType) {
+            SourceEventType.LIVE_STARTED -> startedAt ?: observedAt
+            SourceEventType.LIVE_ENDED -> endedAt ?: observedAt
+            else -> observedAt
         }
         val roomId = current.roomId.ifBlank { previous.roomId }
         val title = current.title.ifBlank { previous.title }
 
         return SourceUpdate(
             key = UpdateKey(
-                platformId = BILIBILI_PLATFORM.id,
-                updateType = change.updateType,
-                externalId = "$roomId:$eventTime",
                 publisherKey = publisher.key,
+                eventType = eventType,
+                externalId = "$roomId:$eventTime",
             ),
-            operation = UpdateOperation.STATE_CHANGED,
-            publisher = publisher.toSnapshot(),
+            publisher = publisher.toInfo(),
             occurredAtEpochSeconds = eventTime,
             observedAtEpochSeconds = observedAt,
             link = liveLink(roomId),
@@ -595,7 +593,6 @@ public class BilibiliPublisherPlugin() : PlatformPublisherPlugin, DynamicLinkRes
                 cover = current.cover ?: previous.cover,
                 status = current.status,
                 previousStatus = previous.status,
-                change = change,
                 startedAtEpochSeconds = startedAt,
                 endedAtEpochSeconds = endedAt,
             ),

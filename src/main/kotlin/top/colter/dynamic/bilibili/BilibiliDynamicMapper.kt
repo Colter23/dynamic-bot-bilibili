@@ -48,12 +48,11 @@ import top.colter.dynamic.core.data.PollAttachment
 import top.colter.dynamic.core.data.Publisher
 import top.colter.dynamic.core.data.PublisherKey
 import top.colter.dynamic.core.data.PublisherKind
-import top.colter.dynamic.core.data.PublisherSnapshot
+import top.colter.dynamic.core.data.PublisherInfo
+import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.data.SourceUpdate
 import top.colter.dynamic.core.data.SourceUpdateReference
-import top.colter.dynamic.core.data.TagAttachment
 import top.colter.dynamic.core.data.UpdateKey
-import top.colter.dynamic.core.data.UpdateOperation
 import top.colter.dynamic.core.data.VideoAttachment
 
 internal class BilibiliDynamicMapper {
@@ -68,12 +67,10 @@ internal class BilibiliDynamicMapper {
         val publisher = buildPublisher(source.modules.author, fallbackPublisher)
         return SourceUpdate(
             key = UpdateKey(
-                platformId = BILIBILI_PLATFORM.id,
-                updateType = BILIBILI_DYNAMIC_UPDATE_TYPE,
-                externalId = dynamicId,
                 publisherKey = publisher.key,
+                eventType = SourceEventType.DYNAMIC_CREATED,
+                externalId = dynamicId,
             ),
-            operation = UpdateOperation.CREATED,
             publisher = publisher,
             occurredAtEpochSeconds = source.timestampSeconds(),
             observedAtEpochSeconds = System.currentTimeMillis() / 1000,
@@ -89,8 +86,8 @@ internal class BilibiliDynamicMapper {
         )
     }
 
-    private fun buildPublisher(author: ModuleAuthor, fallbackPublisher: Publisher): PublisherSnapshot {
-        val fallback = fallbackPublisher.toSnapshot()
+    private fun buildPublisher(author: ModuleAuthor, fallbackPublisher: Publisher): PublisherInfo {
+        val fallback = fallbackPublisher.toInfo()
         val key = PublisherKey.of(
             platformId = BILIBILI_PLATFORM.id.value,
             kind = if (author.type == AUTHOR_TYPE_NORMAL) PublisherKind.USER else PublisherKind.OTHER,
@@ -114,6 +111,7 @@ internal class BilibiliDynamicMapper {
             source.modules.dispute?.title.toLabel(DynamicLabelKind.WARNING, "module.dispute"),
             source.modules.fold?.statement.toLabel(DynamicLabelKind.WARNING, "module.fold"),
             source.modules.dynamic.major?.none?.tips.toLabel(DynamicLabelKind.WARNING, "major.none"),
+            source.modules.dynamic.topic?.name.toLabel(DynamicLabelKind.TAG, "dynamic.topic"),
         )
     }
 
@@ -182,21 +180,6 @@ internal class BilibiliDynamicMapper {
             (major?.buildSmallCard(source) ?: source.modules.dynamic.additional?.buildSmallCard())?.let(::add)
             major?.buildMiniCard(source)?.let(::add)
             source.modules.dynamic.additional?.buildPoll()?.let(::add)
-            source.modules.dynamic.topic?.let { topic ->
-                topic.id
-                    .takeIf { it > 0 }
-                    ?.toString()
-                    ?.let { id ->
-                        add(
-                            TagAttachment(
-                                id = id,
-                                text = topic.name.takeIfNotBlank() ?: id,
-                                tagType = DynamicContentTagType.TOPIC,
-                                link = topic.jumpUrl.toNormalizedUrlOrNull(),
-                            )
-                        )
-                    }
-            }
         }
     }
 

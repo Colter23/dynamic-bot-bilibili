@@ -18,14 +18,17 @@ import top.colter.bilibili.data.login.QrCodeLoginStatus
 import top.colter.bilibili.data.user.BiliGroup
 import top.colter.bilibili.data.user.BiliUserNav
 import top.colter.bilibili.exception.BiliLoginException
-import top.colter.dynamic.core.data.LazyImage as CoreLazyImage
-import top.colter.dynamic.core.data.LiveChange
+import top.colter.dynamic.core.data.LivePayload
 import top.colter.dynamic.core.data.LiveStatus
-import top.colter.dynamic.core.data.LiveStatusUpdate
-import top.colter.dynamic.core.data.PublisherCursor
+import top.colter.dynamic.core.data.MediaKind
+import top.colter.dynamic.core.data.MediaRef
+import top.colter.dynamic.core.data.PublisherInfo
+import top.colter.dynamic.core.data.PublisherKey
 import top.colter.dynamic.core.data.PublisherLiveStatus
-import top.colter.dynamic.core.data.PublisherProfile
-import top.colter.dynamic.core.data.SubscriberType
+import top.colter.dynamic.core.data.SourceCursor
+import top.colter.dynamic.core.data.SourceEventType
+import top.colter.dynamic.core.data.TargetAddress
+import top.colter.dynamic.core.data.TargetKind
 import top.colter.dynamic.core.event.EventManger
 import top.colter.dynamic.core.event.Listener
 import top.colter.dynamic.core.event.SourceUpdateEvent
@@ -63,7 +66,7 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
-    fun `fetchPublisherProfile should map gateway snapshot to publisher profile`() = runBlocking {
+    fun `fetchPublisherInfo should map gateway snapshot to publisher info`() = runBlocking {
         val gateway = FakeGateway(
             snapshot = BilibiliPublisherSnapshot(
                 userId = "123",
@@ -79,12 +82,12 @@ class BilibiliPublisherPluginTest {
         val plugin = testPlugin(gateway)
         plugin.init()
 
-        val profile = plugin.fetchPublisherProfile("123")
+        val profile = plugin.fetchPublisherInfo("123")
 
-        assertEquals("bilibili", profile?.platformId)
+        assertEquals("bilibili", profile?.platformId?.value)
         assertEquals("123", profile?.externalId)
         assertEquals("demo-up", profile?.name)
-        assertEquals("https://example.com/face.png", profile?.face?.uri)
+        assertEquals("https://example.com/face.png", profile?.avatar?.uri)
     }
 
     @Test
@@ -127,7 +130,7 @@ class BilibiliPublisherPluginTest {
 
         requireNotNull(parsed)
         assertEquals("bilibili", parsed.platformId)
-        assertEquals("1205230877720707077", parsed.dynamicId)
+        assertEquals("1205230877720707077", parsed.updateId)
         assertEquals("https://t.bilibili.com/1205230877720707077", parsed.normalizedUrl)
     }
 
@@ -140,9 +143,9 @@ class BilibiliPublisherPluginTest {
         val mobileOpus = plugin.parseDynamicLink("https://m.bilibili.com/opus/774783779415785529")
         val mobileDynamic = plugin.parseDynamicLink("https://m.bilibili.com/dynamic/774783779415785530")
 
-        assertEquals("774783779415785528", opus?.dynamicId)
-        assertEquals("774783779415785529", mobileOpus?.dynamicId)
-        assertEquals("774783779415785530", mobileDynamic?.dynamicId)
+        assertEquals("774783779415785528", opus?.updateId)
+        assertEquals("774783779415785529", mobileOpus?.updateId)
+        assertEquals("774783779415785530", mobileDynamic?.updateId)
     }
 
     @Test
@@ -157,7 +160,7 @@ class BilibiliPublisherPluginTest {
         val parsed = plugin.parseDynamicLink(shortUrl)
 
         requireNotNull(parsed)
-        assertEquals("774783779415785528", parsed.dynamicId)
+        assertEquals("774783779415785528", parsed.updateId)
         assertEquals("https://t.bilibili.com/774783779415785528", parsed.normalizedUrl)
         assertEquals(shortUrl, parsed.sourceUrl)
         assertEquals(listOf(shortUrl), gateway.expandedShortUrls)
@@ -188,9 +191,9 @@ class BilibiliPublisherPluginTest {
         val resolution = plugin.resolveDynamicLink(parsed)
 
         assertIs<DynamicLinkResolution.Success>(resolution)
-        assertEquals(detail.id.toString(), resolution.dynamic.dynamicId)
-        assertEquals("42", resolution.dynamic.publisher.externalId)
-        assertEquals("demo-up", resolution.dynamic.publisher.name)
+        assertEquals(detail.id.toString(), resolution.update.key.externalId)
+        assertEquals("42", resolution.update.publisher.externalId)
+        assertEquals("demo-up", resolution.update.publisher.name)
         assertEquals(listOf(detail.id.toString()), gateway.requestedDetails)
     }
 
@@ -237,11 +240,13 @@ class BilibiliPublisherPluginTest {
         )
 
         val seeded = seedPublisherAndSubscriber()
-        val existingCursor = PublisherCursor(
+        val existingCursor = SourceCursor(
             publisherId = seeded.publisher.id,
-            lastSeenDynamicId = dynamicIdFor(now - 5_000L, 99),
-            lastSeenAt = now - 5_000L,
-            recentDynamicIds = emptyList(),
+            sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
+            eventType = SourceEventType.DYNAMIC_CREATED,
+            lastSeenUpdateKey = dynamicIdFor(now - 5_000L, 99),
+            lastSeenAtEpochSeconds = now - 5_000L,
+            recentUpdateKeys = emptyList(),
         )
         cursorStore.put(seeded.publisher.id, existingCursor)
         val page1Newest = buildDynamic(now - 3_600L, seeded.publisher.externalId.toLong(), "demo-up", 1)
@@ -288,11 +293,13 @@ class BilibiliPublisherPluginTest {
         )
 
         val seeded = seedPublisherAndSubscriber()
-        val existingCursor = PublisherCursor(
+        val existingCursor = SourceCursor(
             publisherId = seeded.publisher.id,
-            lastSeenDynamicId = dynamicIdFor(now - 5_000L, 99),
-            lastSeenAt = now - 5_000L,
-            recentDynamicIds = emptyList(),
+            sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
+            eventType = SourceEventType.DYNAMIC_CREATED,
+            lastSeenUpdateKey = dynamicIdFor(now - 5_000L, 99),
+            lastSeenAtEpochSeconds = now - 5_000L,
+            recentUpdateKeys = emptyList(),
         )
         cursorStore.put(seeded.publisher.id, existingCursor)
         val page1Newest = buildDynamic(now - 3_600L, seeded.publisher.externalId.toLong(), "demo-up", 1)
@@ -565,8 +572,8 @@ class BilibiliPublisherPluginTest {
         )
 
         val dynamicEvent = withTimeout(3_000) { received.await() }
-        assertNull(dynamicEvent.target)
-        assertEquals(rawDynamic.id.toString(), dynamicEvent.update.updateId)
+        assertNull(dynamicEvent.targetOverride)
+        assertEquals(rawDynamic.id.toString(), dynamicEvent.update.key.externalId)
         assertEquals(listOf(1), gateway.requestedPages)
         assertEquals(
             rawDynamic.id.toString(),
@@ -606,16 +613,18 @@ class BilibiliPublisherPluginTest {
 
         val startedAt = System.currentTimeMillis() / 1000
         gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.OPEN, startedAt)))
-        val started = withTimeout(3_000) { received.receive() }.update as LiveStatusUpdate
-        assertEquals(LiveChange.STARTED, started.change)
+        val startedUpdate = withTimeout(3_000) { received.receive() }.update
+        val started = assertIs<LivePayload>(startedUpdate.payload)
+        assertEquals(SourceEventType.LIVE_STARTED, startedUpdate.eventType)
         assertEquals("456", started.roomId)
-        assertEquals(startedAt, started.startedAt)
+        assertEquals(startedAt, started.startedAtEpochSeconds)
 
         gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.CLOSE)))
-        val ended = withTimeout(3_000) { received.receive() }.update as LiveStatusUpdate
-        assertEquals(LiveChange.ENDED, ended.change)
-        assertEquals(startedAt, ended.startedAt)
-        assertTrue(ended.endedAt != null)
+        val endedUpdate = withTimeout(3_000) { received.receive() }.update
+        val ended = assertIs<LivePayload>(endedUpdate.payload)
+        assertEquals(SourceEventType.LIVE_ENDED, endedUpdate.eventType)
+        assertEquals(startedAt, ended.startedAtEpochSeconds)
+        assertTrue(ended.endedAtEpochSeconds != null)
 
         plugin.stop()
     }
@@ -802,19 +811,20 @@ class BilibiliPublisherPluginTest {
         externalId: String = "123",
         targetId: String = "9001",
     ): SeededSubscription {
-        val publisher = PublisherRepository.upsertProfile(
-            PublisherProfile(
-                platformId = "bilibili",
-                externalId = externalId,
+        val publisher = PublisherRepository.upsertInfo(
+            PublisherInfo(
+                key = PublisherKey.of(platformId = "bilibili", externalId = externalId),
                 name = "demo-up",
-                face = CoreLazyImage("https://example.com/face.png"),
+                avatar = MediaRef("https://example.com/face.png", MediaKind.AVATAR),
             ),
         ).value
         val subscriber = SubscriberRepository.upsert(
-            platformId = "qq",
-            targetId = targetId,
+            address = TargetAddress.of(
+                platformId = "qq",
+                kind = TargetKind.GROUP,
+                externalId = targetId,
+            ),
             name = "demo-subscriber",
-            type = SubscriberType.GROUP,
         ).value
         SubscriptionRepository.subscribe(subscriber.id, publisher.id)
         return SeededSubscription(publisher = publisher, subscriber = subscriber)
@@ -930,7 +940,7 @@ class BilibiliPublisherPluginTest {
             return shortUrlExpansions[url]
         }
 
-        override suspend fun fetchPublisherProfile(userId: String): BilibiliPublisherSnapshot? = snapshot
+        override suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot? = snapshot
 
         override suspend fun queryFollowState(userId: String): FollowState = followState
 
@@ -991,32 +1001,34 @@ class BilibiliPublisherPluginTest {
     }
 
     private class InMemoryCursorStore(
-        initialStates: Map<Int, PublisherCursor> = emptyMap(),
+        initialStates: Map<Int, SourceCursor> = emptyMap(),
     ) : BilibiliCursorStore {
-        private val states: MutableMap<Int, PublisherCursor> = linkedMapOf<Int, PublisherCursor>().apply {
+        private val states: MutableMap<Int, SourceCursor> = linkedMapOf<Int, SourceCursor>().apply {
             putAll(initialStates)
         }
         private val marks: MutableList<CursorMark> = mutableListOf()
 
-        override fun get(publisherId: Int): PublisherCursor? = states[publisherId]
+        override fun get(publisherId: Int): SourceCursor? = states[publisherId]
 
-        override fun ensureBaseline(publisherId: Int, timestamp: Long): PublisherCursor {
+        override fun ensureBaseline(publisherId: Int, timestamp: Long): SourceCursor {
             states[publisherId]?.let { return it }
             return markSeen(publisherId, "__baseline__$timestamp", timestamp)
         }
 
-        override fun markSeen(publisherId: Int, dynamicId: String, timestamp: Long): PublisherCursor {
+        override fun markSeen(publisherId: Int, dynamicId: String, timestamp: Long): SourceCursor {
             val previous = states[publisherId]
-            val recent = LinkedHashSet(previous?.recentDynamicIds ?: emptyList())
+            val recent = LinkedHashSet(previous?.recentUpdateKeys ?: emptyList())
             recent.add(dynamicId)
             while (recent.size > 50) {
                 recent.remove(recent.first())
             }
-            val updated = PublisherCursor(
+            val updated = SourceCursor(
                 publisherId = publisherId,
-                lastSeenDynamicId = dynamicId,
-                lastSeenAt = timestamp,
-                recentDynamicIds = recent.toList(),
+                sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
+                eventType = SourceEventType.DYNAMIC_CREATED,
+                lastSeenUpdateKey = dynamicId,
+                lastSeenAtEpochSeconds = timestamp,
+                recentUpdateKeys = recent.toList(),
             )
             states[publisherId] = updated
             marks.add(CursorMark(publisherId, dynamicId, timestamp))
@@ -1027,7 +1039,7 @@ class BilibiliPublisherPluginTest {
             return marks.filter { it.publisherId == publisherId }.map { it.dynamicId }
         }
 
-        fun put(publisherId: Int, cursor: PublisherCursor) {
+        fun put(publisherId: Int, cursor: SourceCursor) {
             states[publisherId] = cursor
         }
     }

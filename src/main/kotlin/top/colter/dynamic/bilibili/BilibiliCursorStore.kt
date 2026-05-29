@@ -3,13 +3,12 @@ package top.colter.dynamic.bilibili
 import java.util.concurrent.ConcurrentHashMap
 import top.colter.dynamic.core.data.PublisherLiveStatus
 import top.colter.dynamic.core.data.SourceCursor
+import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.repository.PublisherLiveStatusRepository
 import top.colter.dynamic.core.repository.SourceCursorRepository
 
 internal const val BILIBILI_DYNAMIC_SOURCE_KEY: String = "dynamic-feed"
-internal const val BILIBILI_DYNAMIC_UPDATE_TYPE: String = "dynamic"
 internal const val BILIBILI_LIVE_SOURCE_KEY: String = "live-status"
-internal const val BILIBILI_LIVE_UPDATE_TYPE: String = "live"
 
 internal interface BilibiliCursorStore {
     fun get(publisherId: Int): SourceCursor?
@@ -25,7 +24,7 @@ internal class DatabaseBilibiliCursorStore : BilibiliCursorStore {
     override fun get(publisherId: Int): SourceCursor? {
         cache[publisherId]?.let { return it }
         return SourceCursorRepository
-            .find(publisherId, BILIBILI_DYNAMIC_SOURCE_KEY, BILIBILI_DYNAMIC_UPDATE_TYPE)
+            .find(publisherId, BILIBILI_DYNAMIC_SOURCE_KEY, SourceEventType.DYNAMIC_CREATED)
             ?.also { cache[publisherId] = it }
     }
 
@@ -33,7 +32,7 @@ internal class DatabaseBilibiliCursorStore : BilibiliCursorStore {
         val updated = SourceCursorRepository.ensureBaseline(
             publisherId = publisherId,
             sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
-            updateType = BILIBILI_DYNAMIC_UPDATE_TYPE,
+            eventType = SourceEventType.DYNAMIC_CREATED,
             timestamp = timestamp,
         )
         cache[publisherId] = updated
@@ -44,7 +43,7 @@ internal class DatabaseBilibiliCursorStore : BilibiliCursorStore {
         val updated = SourceCursorRepository.markSeen(
             publisherId = publisherId,
             sourceKey = BILIBILI_DYNAMIC_SOURCE_KEY,
-            updateType = BILIBILI_DYNAMIC_UPDATE_TYPE,
+            eventType = SourceEventType.DYNAMIC_CREATED,
             updateKey = dynamicId,
             timestamp = timestamp,
         )
