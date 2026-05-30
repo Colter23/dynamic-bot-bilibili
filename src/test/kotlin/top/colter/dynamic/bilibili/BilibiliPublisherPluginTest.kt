@@ -39,6 +39,9 @@ import top.colter.dynamic.core.data.SourceCursor
 import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.data.Subscriber
 import top.colter.dynamic.core.data.Subscription
+import top.colter.dynamic.core.data.SubscriptionEventKind
+import top.colter.dynamic.core.data.SubscriptionPolicy
+import top.colter.dynamic.core.data.SubscriptionSubscriber
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
 import top.colter.dynamic.core.config.ConfigService
@@ -779,7 +782,7 @@ class BilibiliPublisherPluginTest {
             liveStatusStore = liveStore,
         )
         val sourceUpdates = RecordingSourceUpdatePublisher()
-        seedPublisherAndSubscriber()
+        seedPublisherAndSubscriber(policy = livePolicy())
 
         plugin.init(sourceUpdates)
         plugin.start()
@@ -815,7 +818,7 @@ class BilibiliPublisherPluginTest {
         )
         val plugin = testPlugin(gateway, config = testConfig(pollingIntervalMs = 25))
         val sourceUpdates = RecordingSourceUpdatePublisher()
-        seedPublisherAndSubscriber()
+        seedPublisherAndSubscriber(policy = livePolicy())
 
         plugin.init(sourceUpdates)
         plugin.start()
@@ -854,7 +857,7 @@ class BilibiliPublisherPluginTest {
             liveStatusStore = liveStore,
         )
         val sourceUpdates = RecordingSourceUpdatePublisher()
-        seedPublisherAndSubscriber()
+        seedPublisherAndSubscriber(policy = livePolicy())
 
         plugin.init(sourceUpdates)
         plugin.start()
@@ -885,8 +888,16 @@ class BilibiliPublisherPluginTest {
             liveStatusStore = liveStore,
         )
         val sourceUpdates = RecordingSourceUpdatePublisher()
-        val failedPublisher = seedPublisherAndSubscriber(externalId = "101", targetId = "9001").publisher
-        val closedPublisher = seedPublisherAndSubscriber(externalId = "102", targetId = "9002").publisher
+        val failedPublisher = seedPublisherAndSubscriber(
+            externalId = "101",
+            targetId = "9001",
+            policy = livePolicy(),
+        ).publisher
+        val closedPublisher = seedPublisherAndSubscriber(
+            externalId = "102",
+            targetId = "9002",
+            policy = livePolicy(),
+        ).publisher
 
         plugin.init(sourceUpdates)
         plugin.start()
@@ -922,15 +933,60 @@ class BilibiliPublisherPluginTest {
             gateway,
             config = testConfig(pollingIntervalMs = 30_000, liveStatusBatchSize = 2),
         )
-        seedPublisherAndSubscriber(externalId = "101", targetId = "9001")
-        seedPublisherAndSubscriber(externalId = "102", targetId = "9002")
-        seedPublisherAndSubscriber(externalId = "103", targetId = "9003")
+        seedPublisherAndSubscriber(externalId = "101", targetId = "9001", policy = livePolicy())
+        seedPublisherAndSubscriber(externalId = "102", targetId = "9002", policy = livePolicy())
+        seedPublisherAndSubscriber(externalId = "103", targetId = "9003", policy = livePolicy())
 
         plugin.init()
         plugin.start()
         plugin.stop()
 
         assertEquals(listOf(listOf(101L, 102L), listOf(103L)), gateway.requestedLiveBatches.take(2))
+    }
+
+    @Test
+    fun `live polling should ignore publishers without live event subscription`() {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(pollingIntervalMs = 30_000),
+        )
+        seedPublisherAndSubscriber()
+
+        plugin.init()
+        plugin.start()
+        plugin.stop()
+
+        assertTrue(gateway.requestedLiveBatches.isEmpty())
+    }
+
+    @Test
+    fun `dynamic polling should ignore live only subscriptions`() {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(pollingIntervalMs = 30_000),
+        )
+        seedPublisherAndSubscriber(policy = livePolicy())
+
+        plugin.init()
+        plugin.start()
+        plugin.stop()
+
+        assertTrue(gateway.requestedPages.isEmpty())
+        assertEquals(listOf(listOf(123L)), gateway.requestedLiveBatches.take(1))
     }
 
     @Test
@@ -1049,6 +1105,15 @@ class BilibiliPublisherPluginTest {
         )
     }
 
+    private fun livePolicy(): SubscriptionPolicy {
+        return SubscriptionPolicy(
+            enabledEvents = setOf(
+                SubscriptionEventKind.LIVE_STARTED,
+                SubscriptionEventKind.LIVE_ENDED,
+            ),
+        )
+    }
+
     private fun defaultGateway(
         dynamicDetails: Map<String, BiliDynamic> = emptyMap(),
         shortUrlExpansions: Map<String, String?> = emptyMap(),
@@ -1065,6 +1130,7 @@ class BilibiliPublisherPluginTest {
     private fun seedPublisherAndSubscriber(
         externalId: String = "123",
         targetId: String = "9001",
+        policy: SubscriptionPolicy = SubscriptionPolicy.default(),
     ): SeededSubscription {
         val publisher = TestSubscriptions.upsertPublisher(
             PublisherInfo(
@@ -1081,7 +1147,7 @@ class BilibiliPublisherPluginTest {
             ),
             name = "demo-subscriber",
         )
-        val subscription = TestSubscriptions.subscribe(subscriber, publisher)
+        val subscription = TestSubscriptions.subscribe(subscriber, publisher, policy)
         return SeededSubscription(publisher = publisher, subscriber = subscriber, subscription = subscription)
     }
 
@@ -1516,7 +1582,11 @@ class BilibiliPublisherPluginTest {
             return subscriber
         }
 
-        fun subscribe(subscriber: Subscriber, publisher: Publisher): Subscription {
+        fun subscribe(
+            subscriber: Subscriber,
+            publisher: Publisher,
+            policy: SubscriptionPolicy = SubscriptionPolicy.default(),
+        ): Subscription {
             val key = subscriber.id to publisher.id
             val existing = subscriptions[key]
             if (existing != null) return existing
@@ -1528,6 +1598,7 @@ class BilibiliPublisherPluginTest {
                 publisherId = publisher.id,
                 createdAtEpochSeconds = now,
                 updatedAtEpochSeconds = now,
+                policy = policy,
             )
             subscriptions[key] = subscription
             return subscription
@@ -1535,24 +1606,26 @@ class BilibiliPublisherPluginTest {
 
         override fun findActivePublisherWithSubscribersById(publisherId: Int): PublisherSubscribers? {
             val publisher = publishers[publisherId] ?: return null
-            val activeSubscribers = subscriptions.values
+            val activeSubscriptions = subscriptions.values
                 .filter { it.publisherId == publisherId && it.state == EntityState.ACTIVE }
-                .mapNotNull { subscribers[it.subscriberId] }
-                .filter { it.state == EntityState.ACTIVE }
-            if (activeSubscribers.isEmpty()) return null
-            return PublisherSubscribers(publisher, activeSubscribers)
+                .mapNotNull { subscription ->
+                    val subscriber = subscribers[subscription.subscriberId]
+                        ?.takeIf { it.state == EntityState.ACTIVE }
+                        ?: return@mapNotNull null
+                    SubscriptionSubscriber(subscription, subscriber)
+                }
+            if (activeSubscriptions.isEmpty()) return null
+            return PublisherSubscribers(publisher, activeSubscriptions)
         }
 
         override fun findActivePublishersWithSubscribersBySourcePlatform(
             platformId: String,
-        ): Map<Publisher, List<Subscriber>> {
+        ): List<PublisherSubscribers> {
             return publishers.values
                 .filter { it.platformId.value == platformId && it.state == EntityState.ACTIVE }
                 .mapNotNull { publisher ->
-                    val snapshot = findActivePublisherWithSubscribersById(publisher.id) ?: return@mapNotNull null
-                    snapshot.publisher to snapshot.subscribers
+                    findActivePublisherWithSubscribersById(publisher.id)
                 }
-                .toMap()
         }
     }
 
