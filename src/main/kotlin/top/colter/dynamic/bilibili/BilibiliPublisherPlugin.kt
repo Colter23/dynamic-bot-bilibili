@@ -476,8 +476,11 @@ public class BilibiliPublisherPlugin() :
         if (config.replayWindowHours > 0 && allowReplay) {
             runCatching { replayMissingDynamics() }
                 .onFailure {
-                    logger.warn(it) {
-                        "Bilibili 历史动态补发失败"
+                    logger.warn {
+                        "Bilibili 历史动态补发未完成：${it.message ?: "未知错误"}"
+                    }
+                    logger.debug(it) {
+                        "Bilibili 历史动态补发异常详情"
                     }
                 }
         } else if (!taskScheduler.isRunning(detectTaskId)) {
@@ -736,7 +739,19 @@ public class BilibiliPublisherPlugin() :
 
         var page = 1
         while (true) {
-            val pageResult = pollService.fetchNewDynamicPage(page)
+            val pageFetch = runCatching { pollService.fetchNewDynamicPage(page) }
+            if (pageFetch.isFailure) {
+                val error = pageFetch.exceptionOrNull()
+                if (collectedDynamics.isEmpty()) {
+                    throw error ?: IllegalStateException("Bilibili 历史动态分页拉取失败")
+                }
+                logger.warn {
+                    "Bilibili 历史动态分页提前停止：page=$page，已收集=${collectedDynamics.size} 条，将继续补发已收集动态；原因=${error?.message ?: "未知错误"}"
+                }
+                break
+            }
+
+            val pageResult = pageFetch.getOrThrow()
             val items = pageResult.items
             if (items.isEmpty()) break
 

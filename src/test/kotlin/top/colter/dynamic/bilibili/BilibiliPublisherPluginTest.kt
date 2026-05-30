@@ -389,6 +389,59 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `replay window should keep collected pages when later page fails`() {
+        val now = System.currentTimeMillis() / 1000
+        val cursorStore = InMemoryCursorStore()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            initialDynamicPages = emptyMap(),
+            failingDynamicPages = setOf(2),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(replayWindowHours = 2),
+            cursorStore = cursorStore,
+        )
+
+        val seeded = seedPublisherAndSubscriber()
+        cursorStore.put(
+            seeded.publisher.id,
+            SourceCursor(
+                publisherId = seeded.publisher.id,
+                sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
+                eventType = SourceEventType.DYNAMIC_CREATED,
+                lastSeenUpdateKey = dynamicIdFor(now - 5_000L, 99),
+                lastSeenAtEpochSeconds = now - 5_000L,
+                recentUpdateKeys = emptyList(),
+            ),
+        )
+        val page1Newest = buildDynamic(now - 3_600L, seeded.publisher.externalId.toLong(), "demo-up", 1)
+        val page1Older = buildDynamic(now - 3_700L, seeded.publisher.externalId.toLong(), "demo-up", 2)
+        gateway.setDynamicPages(
+            mapOf(
+                1 to dynamicPage(true, page1Newest, page1Older),
+            )
+        )
+
+        plugin.init()
+        plugin.start()
+
+        assertEquals(listOf(1, 2), gateway.requestedPages.take(2))
+        assertEquals(
+            listOf(
+                dynamicIdFor(now - 3_700L, 2),
+                dynamicIdFor(now - 3_600L, 1),
+            ),
+            cursorStore.markedDynamicIds(seeded.publisher.id),
+        )
+
+        plugin.stop()
+    }
+
+    @Test
     fun `followGroupName should create group on startup and add followed publisher to it`() = runBlocking {
         val scheduler = testScheduler()
         val gateway = FakeGateway(
@@ -1213,12 +1266,14 @@ class BilibiliPublisherPluginTest {
             "unfollowed",
         ),
         initialDynamicPages: Map<Int, BiliDynamicList> = emptyMap(),
+        failingDynamicPages: Set<Int> = emptySet(),
         initialGroups: List<BiliGroup> = emptyList(),
         initialLiveSnapshots: Map<Long, BilibiliLiveSnapshot> = emptyMap(),
         failingLiveBatches: Set<List<Long>> = emptySet(),
     ) : BilibiliPlatformGateway {
         private val groups: MutableList<BiliGroup> = initialGroups.toMutableList()
         private val dynamicPages: MutableMap<Int, BiliDynamicList> = initialDynamicPages.toMutableMap()
+        private val dynamicPageFailures: MutableSet<Int> = failingDynamicPages.toMutableSet()
         private val liveSnapshots: MutableMap<Long, BilibiliLiveSnapshot> = initialLiveSnapshots.toMutableMap()
         private val liveBatchFailures: MutableSet<List<Long>> = failingLiveBatches.map { it.toList() }.toMutableSet()
         private var nextGroupId: Long = (groups.maxOfOrNull { it.tid } ?: 0L) + 1L
@@ -1235,6 +1290,9 @@ class BilibiliPublisherPluginTest {
 
         override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
             requestedPages.add(page)
+            if (page in dynamicPageFailures) {
+                error("dynamic page failed: $page")
+            }
             return dynamicPages[page] ?: BiliDynamicList(
                 hasMore = false,
                 offset = "",
@@ -1247,6 +1305,11 @@ class BilibiliPublisherPluginTest {
         fun setDynamicPages(pages: Map<Int, BiliDynamicList>) {
             dynamicPages.clear()
             dynamicPages.putAll(pages)
+        }
+
+        fun setFailingDynamicPages(pages: Set<Int>) {
+            dynamicPageFailures.clear()
+            dynamicPageFailures.addAll(pages)
         }
 
         override suspend fun fetchDynamicDetail(dynamicId: String): BiliDynamic? {
