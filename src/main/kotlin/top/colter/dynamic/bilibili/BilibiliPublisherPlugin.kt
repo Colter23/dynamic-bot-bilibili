@@ -386,6 +386,7 @@ public class BilibiliPublisherPlugin() :
     private suspend fun detectAndPublish() {
         if (!detectMutex.tryLock()) {
             pendingDetection = true
+            logger.debug { "Bilibili 检测仍在执行，本轮已标记为补跑" }
             return
         }
 
@@ -403,7 +404,10 @@ public class BilibiliPublisherPlugin() :
         loadActivePublishers(logSummary = false)
         val dynamicPublisherSnapshot = dynamicPublishers
         val livePublisherSnapshot = livePublishers
-        if (dynamicPublisherSnapshot.isEmpty() && livePublisherSnapshot.isEmpty()) return
+        if (dynamicPublisherSnapshot.isEmpty() && livePublisherSnapshot.isEmpty()) {
+            logger.debug { "Bilibili 检测跳过：没有活跃订阅发布者" }
+            return
+        }
 
         if (dynamicPublisherSnapshot.isNotEmpty()) {
             val start = System.currentTimeMillis()
@@ -449,6 +453,9 @@ public class BilibiliPublisherPlugin() :
                         }
 
                         val dynamic = mapper.map(raw, publisher) ?: return@dynamicLoop
+                        logger.info {
+                            "Bilibili 检测到新动态：publisher=${publisher.displayLabel()}，uid=$uid，dynamicId=$dynamicId，time=${raw.time}"
+                        }
                         if (publishSourceUpdate(dynamic)) {
                             cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
                         }
@@ -569,6 +576,11 @@ public class BilibiliPublisherPlugin() :
                 observedAt = now,
             )
             val update = buildLiveUpdate(publisher, previous, current, now)
+            if (update != null) {
+                logger.info {
+                    "Bilibili 检测到直播状态变化：publisher=${publisher.displayLabel()}，event=${update.eventType.value}，roomId=${current.roomId}"
+                }
+            }
             if (update == null || publishSourceUpdate(update)) {
                 liveStatusStore.save(current)
             }
@@ -753,6 +765,9 @@ public class BilibiliPublisherPlugin() :
                 if (raw.time <= cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) return@dynamicLoop
 
                 val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
+                logger.info {
+                    "Bilibili 补发历史动态：publisher=${target.publisher.displayLabel()}，uid=${target.userId}，dynamicId=$dynamicId，time=${raw.time}"
+                }
                 if (publishSourceUpdate(dynamic)) {
                     cursor = cursorStore.markSeen(target.publisher.id, dynamicId, raw.time)
                 }
@@ -761,13 +776,20 @@ public class BilibiliPublisherPlugin() :
     }
 
     private suspend fun publishSourceUpdate(update: SourceUpdate): Boolean {
+        logger.info {
+            "Bilibili 提交来源更新到主项目：event=${update.eventType.value}，update=${update.key.stableValue()}，publisher=${update.publisher.displayLabel()}"
+        }
         val result = sourceUpdatePublisher.publish(
             SourceUpdatePublishRequest(
                 sourcePlugin = pluginId,
                 update = update,
             ),
         )
-        if (!result.accepted) {
+        if (result.accepted) {
+            logger.info {
+                "Bilibili 来源更新已进入主项目：update=${update.key.stableValue()}，结果=${result.message}"
+            }
+        } else {
             logger.warn {
                 "Bilibili 来源更新发布失败，游标暂不推进：update=${update.key.stableValue()}，原因=${result.message}"
             }
@@ -1124,6 +1146,14 @@ public class BilibiliPublisherPlugin() :
             createTime = 0,
             createUser = 0,
         )
+    }
+
+    private fun Publisher.displayLabel(): String {
+        return name.takeIf { it.isNotBlank() } ?: externalId
+    }
+
+    private fun top.colter.dynamic.core.data.PublisherInfo.displayLabel(): String {
+        return name.takeIf { it.isNotBlank() } ?: externalId
     }
 
     private fun PublisherSubscribers.hasLiveEventSubscription(): Boolean {

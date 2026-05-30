@@ -33,10 +33,24 @@ tasks.register<Jar>("fatJar") {
     from(sourceSets.main.get().output)
     dependsOn(configurations.runtimeClasspath)
     from({
-        configurations.runtimeClasspath.get().filter { it.exists() }.map { file ->
+        configurations.runtimeClasspath.get().filter { it.exists() && !it.isHostProvidedByDynamicBot() }.map { file ->
             if (file.isDirectory) file else zipTree(file)
         }
     })
+}
+
+fun File.isHostProvidedByDynamicBot(): Boolean {
+    val normalizedPath = path.replace('\\', '/')
+    return normalizedPath.contains("/dynamic-bot-core/build/") ||
+        name.startsWith("dynamic-bot-core-") ||
+        name.startsWith("kotlin-logging-jvm-") ||
+        name.startsWith("log4j-api-") ||
+        name.startsWith("log4j-core-") ||
+        name.startsWith("log4j-slf4j") ||
+        name.startsWith("log4j-to-slf4j-") ||
+        name.startsWith("logback-") ||
+        name.startsWith("jul-to-slf4j-") ||
+        name.startsWith("slf4j-")
 }
 
 kotlin {
