@@ -3,8 +3,12 @@ package top.colter.dynamic.bilibili
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -21,23 +25,28 @@ import top.colter.bilibili.data.login.QrCodeLoginStatus
 import top.colter.bilibili.data.user.BiliGroup
 import top.colter.bilibili.data.user.BiliUserNav
 import top.colter.bilibili.exception.BiliLoginException
+import top.colter.dynamic.core.data.EntityState
 import top.colter.dynamic.core.data.LivePayload
 import top.colter.dynamic.core.data.LiveStatus
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
+import top.colter.dynamic.core.data.Publisher
 import top.colter.dynamic.core.data.PublisherInfo
 import top.colter.dynamic.core.data.PublisherKey
 import top.colter.dynamic.core.data.PublisherLiveStatus
+import top.colter.dynamic.core.data.PublisherSubscribers
 import top.colter.dynamic.core.data.SourceCursor
 import top.colter.dynamic.core.data.SourceEventType
+import top.colter.dynamic.core.data.Subscriber
+import top.colter.dynamic.core.data.Subscription
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
-import top.colter.dynamic.core.config.YamlConfigService
-import top.colter.dynamic.core.config.YamlPluginDataStore
-import top.colter.dynamic.core.event.EventBus
-import top.colter.dynamic.core.event.EventBusSourceUpdatePublisher
-import top.colter.dynamic.core.event.Listener
-import top.colter.dynamic.core.event.SourceUpdateEvent
+import top.colter.dynamic.core.config.ConfigService
+import top.colter.dynamic.core.config.PluginDataStore
+import top.colter.dynamic.core.command.CommandPublisher
+import top.colter.dynamic.core.event.SourceUpdatePublishRequest
+import top.colter.dynamic.core.event.SourceUpdatePublishResult
+import top.colter.dynamic.core.event.SourceUpdatePublisher
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
 import top.colter.dynamic.core.event.SubscriptionChangeType
 import top.colter.dynamic.core.link.DynamicLinkResolution
@@ -50,60 +59,66 @@ import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import top.colter.dynamic.core.plugin.PluginContext
 import top.colter.dynamic.core.plugin.PluginDescriptor
-import top.colter.dynamic.core.plugin.RepositorySourceStateStore
-import top.colter.dynamic.core.plugin.RepositorySubscriptionQueryService
-import top.colter.dynamic.core.repository.PersistenceManager
-import top.colter.dynamic.core.repository.PublisherRepository
-import top.colter.dynamic.core.repository.SubscriberRepository
-import top.colter.dynamic.core.repository.SubscriptionRepository
+import top.colter.dynamic.core.plugin.SourceStateStore
+import top.colter.dynamic.core.plugin.SubscriptionQueryService
+import top.colter.dynamic.core.task.TaskDefinition
+import top.colter.dynamic.core.task.TaskSchedule
 import top.colter.dynamic.core.task.TaskScheduler
+import top.colter.dynamic.core.task.TaskSnapshot
 import top.colter.dynamic.core.task.TaskStatus
+import java.nio.file.Path
 import kotlin.io.path.createTempDirectory
+import kotlin.reflect.KClass
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-
-private fun BilibiliPublisherPlugin.init(eventBus: EventBus = EventBus()) {
-    runBlocking { onLoad(testPluginContext(eventBus)) }
-}
-
-private fun BilibiliPublisherPlugin.start() {
-    runBlocking { onStart() }
-}
-
-private fun BilibiliPublisherPlugin.stop() {
-    runBlocking { onStop() }
-}
-
-private fun testPluginContext(eventBus: EventBus = EventBus()): PluginContext {
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    return PluginContext(
-        pluginId = "bilibili-publisher",
-        descriptor = PluginDescriptor(
-            id = "bilibili-publisher",
-            name = "Bilibili Publisher Plugin",
-            version = "test",
-            mainClass = BilibiliPublisherPlugin::class.java.name,
-        ),
-        eventBus = eventBus,
-        configService = YamlConfigService(createTempDirectory("dynamic-bot-bilibili-config")),
-        dataStore = YamlPluginDataStore("bilibili-publisher", createTempDirectory("dynamic-bot-bilibili-data")),
-        scope = scope,
-        taskScheduler = TaskScheduler(scope),
-        sourceUpdatePublisher = EventBusSourceUpdatePublisher(eventBus),
-        sourceStateStore = RepositorySourceStateStore,
-        subscriptionQueryService = RepositorySubscriptionQueryService,
-    )
-}
-
-private fun testScheduler(): TaskScheduler {
-    return TaskScheduler(CoroutineScope(SupervisorJob() + Dispatchers.Default))
-}
+import kotlin.time.Duration
 
 class BilibiliPublisherPluginTest {
+
+    private fun BilibiliPublisherPlugin.init(
+        sourceUpdates: RecordingSourceUpdatePublisher = RecordingSourceUpdatePublisher(),
+    ) {
+        runBlocking { onLoad(testPluginContext(sourceUpdates)) }
+    }
+
+    private fun BilibiliPublisherPlugin.start() {
+        runBlocking { onStart() }
+    }
+
+    private fun BilibiliPublisherPlugin.stop() {
+        runBlocking { onStop() }
+    }
+
+    private fun testPluginContext(
+        sourceUpdates: RecordingSourceUpdatePublisher = RecordingSourceUpdatePublisher(),
+    ): PluginContext {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        return PluginContext(
+            pluginId = "bilibili-publisher",
+            descriptor = PluginDescriptor(
+                id = "bilibili-publisher",
+                name = "Bilibili Publisher Plugin",
+                version = "test",
+                mainClass = BilibiliPublisherPlugin::class.java.name,
+            ),
+            configService = InMemoryConfigService(),
+            dataStore = InMemoryPluginDataStore("bilibili-publisher"),
+            scope = scope,
+            taskScheduler = testScheduler(),
+            commandPublisher = CommandPublisher { },
+            sourceUpdatePublisher = sourceUpdates,
+            sourceStateStore = TestSourceStateStore,
+            subscriptionQueryService = TestSubscriptions,
+        )
+    }
+
+    private fun testScheduler(): TaskScheduler {
+        return TestTaskScheduler(CoroutineScope(SupervisorJob() + Dispatchers.Default))
+    }
 
     @Test
     fun `fetchPublisherInfo should map gateway snapshot to publisher info`() = runBlocking {
@@ -706,9 +721,9 @@ class BilibiliPublisherPluginTest {
             taskScheduler = scheduler,
             cursorStore = cursorStore,
         )
-        val eventBus = EventBus()
+        val sourceUpdates = RecordingSourceUpdatePublisher()
 
-        plugin.init(eventBus)
+        plugin.init(sourceUpdates)
         plugin.start()
         withTimeout(3_000) {
             while ((scheduler.snapshot("bilibili-detect")?.runCount ?: 0L) == 0L) {
@@ -717,10 +732,7 @@ class BilibiliPublisherPluginTest {
         }
 
         val seeded = seedPublisherAndSubscriber()
-        val subscription = SubscriptionRepository.findBySubscriberAndPublisher(
-            seeded.subscriber.id,
-            seeded.publisher.id,
-        )!!
+        val subscription = seeded.subscription
         val rawDynamic = buildDynamic(
             epochSeconds = subscription.createdAtEpochSeconds + 1,
             mid = seeded.publisher.externalId.toLong(),
@@ -728,15 +740,6 @@ class BilibiliPublisherPluginTest {
             suffix = 42,
         )
         gateway.setDynamicPages(mapOf(1 to dynamicPage(false, rawDynamic)))
-
-        val received = CompletableDeferred<SourceUpdateEvent>()
-        eventBus.subscribe(
-            object : Listener<SourceUpdateEvent> {
-                override suspend fun onMessage(event: SourceUpdateEvent) {
-                    if (!received.isCompleted) received.complete(event)
-                }
-            },
-        )
 
         plugin.onSubscriptionChanged(
             SubscriptionChangedEvent(
@@ -748,7 +751,7 @@ class BilibiliPublisherPluginTest {
             )
         )
 
-        val dynamicEvent = withTimeout(3_000) { received.await() }
+        val dynamicEvent = withTimeout(3_000) { sourceUpdates.receive() }
         assertNull(dynamicEvent.deliveryTarget)
         assertEquals(rawDynamic.id.toString(), dynamicEvent.update.key.externalId)
         assertEquals(listOf(1), gateway.requestedPages)
@@ -775,32 +778,24 @@ class BilibiliPublisherPluginTest {
             config = testConfig(pollingIntervalMs = 25),
             liveStatusStore = liveStore,
         )
-        val eventBus = EventBus()
+        val sourceUpdates = RecordingSourceUpdatePublisher()
         seedPublisherAndSubscriber()
-        val received = kotlinx.coroutines.channels.Channel<SourceUpdateEvent>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-        eventBus.subscribe(
-            object : Listener<SourceUpdateEvent> {
-                override suspend fun onMessage(event: SourceUpdateEvent) {
-                    received.send(event)
-                }
-            },
-        )
 
-        plugin.init(eventBus)
+        plugin.init(sourceUpdates)
         plugin.start()
         assertEquals(LiveStatus.CLOSE, liveStore.get(1)?.status)
-        assertNull(withTimeoutOrNull(100) { received.receive() })
+        assertNull(withTimeoutOrNull(100) { sourceUpdates.receive() })
 
         val startedAt = System.currentTimeMillis() / 1000
         gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.OPEN, startedAt)))
-        val startedUpdate = withTimeout(3_000) { received.receive() }.update
+        val startedUpdate = withTimeout(3_000) { sourceUpdates.receive() }.update
         val started = assertIs<LivePayload>(startedUpdate.payload)
         assertEquals(SourceEventType.LIVE_STARTED, startedUpdate.eventType)
         assertEquals("456", started.roomId)
         assertEquals(startedAt, started.startedAtEpochSeconds)
 
         gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.CLOSE)))
-        val endedUpdate = withTimeout(3_000) { received.receive() }.update
+        val endedUpdate = withTimeout(3_000) { sourceUpdates.receive() }.update
         val ended = assertIs<LivePayload>(endedUpdate.payload)
         assertEquals(SourceEventType.LIVE_ENDED, endedUpdate.eventType)
         assertEquals(startedAt, ended.startedAtEpochSeconds)
@@ -819,22 +814,14 @@ class BilibiliPublisherPluginTest {
             initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
         )
         val plugin = testPlugin(gateway, config = testConfig(pollingIntervalMs = 25))
-        val eventBus = EventBus()
+        val sourceUpdates = RecordingSourceUpdatePublisher()
         seedPublisherAndSubscriber()
-        val received = CompletableDeferred<SourceUpdateEvent>()
-        eventBus.subscribe(
-            object : Listener<SourceUpdateEvent> {
-                override suspend fun onMessage(event: SourceUpdateEvent) {
-                    if (!received.isCompleted) received.complete(event)
-                }
-            },
-        )
 
-        plugin.init(eventBus)
+        plugin.init(sourceUpdates)
         plugin.start()
         gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.ROUND)))
 
-        assertNull(withTimeoutOrNull(200) { received.await() })
+        assertNull(withTimeoutOrNull(200) { sourceUpdates.receive() })
         plugin.stop()
     }
 
@@ -866,21 +853,13 @@ class BilibiliPublisherPluginTest {
             config = testConfig(pollingIntervalMs = 25, liveStatusBatchSize = 1),
             liveStatusStore = liveStore,
         )
-        val eventBus = EventBus()
+        val sourceUpdates = RecordingSourceUpdatePublisher()
         seedPublisherAndSubscriber()
-        val received = CompletableDeferred<SourceUpdateEvent>()
-        eventBus.subscribe(
-            object : Listener<SourceUpdateEvent> {
-                override suspend fun onMessage(event: SourceUpdateEvent) {
-                    if (!received.isCompleted) received.complete(event)
-                }
-            },
-        )
 
-        plugin.init(eventBus)
+        plugin.init(sourceUpdates)
         plugin.start()
 
-        assertNull(withTimeoutOrNull(200) { received.await() })
+        assertNull(withTimeoutOrNull(200) { sourceUpdates.receive() })
         assertEquals(LiveStatus.OPEN, liveStore.get(1)?.status)
 
         plugin.stop()
@@ -905,19 +884,11 @@ class BilibiliPublisherPluginTest {
             config = testConfig(pollingIntervalMs = 25, liveStatusBatchSize = 1),
             liveStatusStore = liveStore,
         )
-        val eventBus = EventBus()
+        val sourceUpdates = RecordingSourceUpdatePublisher()
         val failedPublisher = seedPublisherAndSubscriber(externalId = "101", targetId = "9001").publisher
         val closedPublisher = seedPublisherAndSubscriber(externalId = "102", targetId = "9002").publisher
-        val received = kotlinx.coroutines.channels.Channel<SourceUpdateEvent>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-        eventBus.subscribe(
-            object : Listener<SourceUpdateEvent> {
-                override suspend fun onMessage(event: SourceUpdateEvent) {
-                    received.send(event)
-                }
-            },
-        )
 
-        plugin.init(eventBus)
+        plugin.init(sourceUpdates)
         plugin.start()
         assertEquals(LiveStatus.OPEN, liveStore.get(failedPublisher.id)?.status)
         assertEquals(LiveStatus.OPEN, liveStore.get(closedPublisher.id)?.status)
@@ -929,10 +900,10 @@ class BilibiliPublisherPluginTest {
             )
         )
 
-        val endedUpdate = withTimeout(3_000) { received.receive() }.update
+        val endedUpdate = withTimeout(3_000) { sourceUpdates.receive() }.update
         assertEquals(SourceEventType.LIVE_ENDED, endedUpdate.eventType)
         assertEquals("102", endedUpdate.publisher.externalId)
-        assertNull(withTimeoutOrNull(150) { received.receive() })
+        assertNull(withTimeoutOrNull(150) { sourceUpdates.receive() })
         assertEquals(LiveStatus.OPEN, liveStore.get(failedPublisher.id)?.status)
         assertEquals(LiveStatus.CLOSE, liveStore.get(closedPublisher.id)?.status)
 
@@ -1044,8 +1015,8 @@ class BilibiliPublisherPluginTest {
         cursorStore: BilibiliCursorStore = InMemoryCursorStore(),
         liveStatusStore: BilibiliLiveStatusStore = InMemoryLiveStatusStore(),
     ): BilibiliPublisherPlugin {
-        val tempDir = createTempDirectory("dynamic-bot-bilibili-test").toFile()
-        PersistenceManager.init(tempDir.resolve("test.db").path)
+        TestSubscriptions.reset()
+        TestSourceStateStore.reset()
         return BilibiliPublisherPlugin(
             loadConfig = { config },
             serviceFactory = { gateway },
@@ -1095,23 +1066,23 @@ class BilibiliPublisherPluginTest {
         externalId: String = "123",
         targetId: String = "9001",
     ): SeededSubscription {
-        val publisher = PublisherRepository.upsertInfo(
+        val publisher = TestSubscriptions.upsertPublisher(
             PublisherInfo(
                 key = PublisherKey.of(platformId = "bilibili", externalId = externalId),
                 name = "demo-up",
                 avatar = MediaRef("https://example.com/face.png", MediaKind.AVATAR),
             ),
-        ).value
-        val subscriber = SubscriberRepository.upsert(
+        )
+        val subscriber = TestSubscriptions.upsertSubscriber(
             address = TargetAddress.of(
                 platformId = "qq",
                 kind = TargetKind.GROUP,
                 externalId = targetId,
             ),
             name = "demo-subscriber",
-        ).value
-        SubscriptionRepository.subscribe(subscriber.id, publisher.id)
-        return SeededSubscription(publisher = publisher, subscriber = subscriber)
+        )
+        val subscription = TestSubscriptions.subscribe(subscriber, publisher)
+        return SeededSubscription(publisher = publisher, subscriber = subscriber, subscription = subscription)
     }
 
     private fun buildDynamic(
@@ -1374,6 +1345,322 @@ class BilibiliPublisherPluginTest {
         }
     }
 
+    private class RecordingSourceUpdatePublisher(
+        private val result: SourceUpdatePublishResult = SourceUpdatePublishResult.enqueued(1),
+    ) : SourceUpdatePublisher {
+        private val requests = Channel<SourceUpdatePublishRequest>(Channel.UNLIMITED)
+
+        override suspend fun publish(request: SourceUpdatePublishRequest): SourceUpdatePublishResult {
+            requests.send(request)
+            return result
+        }
+
+        suspend fun receive(): SourceUpdatePublishRequest = requests.receive()
+    }
+
+    private class InMemoryConfigService : ConfigService {
+        private val values: MutableMap<String, Any> = linkedMapOf()
+        private val root: Path = createTempDirectory("dynamic-bot-bilibili-config")
+
+        override fun <T : Any> loadOrCreate(pluginId: String, clazz: KClass<T>, defaultProvider: () -> T): T {
+            val value = values.getOrPut(pluginId) { defaultProvider() }
+            @Suppress("UNCHECKED_CAST")
+            return value as T
+        }
+
+        override fun <T : Any> save(pluginId: String, config: T) {
+            values[pluginId] = config
+        }
+
+        override fun <T : Any> reload(pluginId: String, clazz: KClass<T>): T {
+            @Suppress("UNCHECKED_CAST")
+            return values.getValue(pluginId) as T
+        }
+
+        override fun exists(pluginId: String): Boolean = pluginId in values
+
+        override fun delete(pluginId: String): Boolean = values.remove(pluginId) != null
+
+        override fun resolvePath(pluginId: String): Path = root.resolve("$pluginId.yml")
+    }
+
+    private class InMemoryPluginDataStore(pluginId: String) : PluginDataStore {
+        override val dataDir: Path = createTempDirectory("dynamic-bot-bilibili-data").resolve(pluginId)
+        private val values: MutableMap<String, Any> = linkedMapOf()
+
+        override fun <T : Any> loadOrCreate(name: String, clazz: KClass<T>, defaultProvider: () -> T): T {
+            val value = values.getOrPut(name) { defaultProvider() }
+            @Suppress("UNCHECKED_CAST")
+            return value as T
+        }
+
+        override fun <T : Any> save(name: String, value: T) {
+            values[name] = value
+        }
+
+        override fun <T : Any> reload(name: String, clazz: KClass<T>): T {
+            @Suppress("UNCHECKED_CAST")
+            return values.getValue(name) as T
+        }
+
+        override fun exists(name: String): Boolean = name in values
+
+        override fun delete(name: String): Boolean = values.remove(name) != null
+
+        override fun resolvePath(name: String): Path = dataDir.resolve("$name.yml")
+    }
+
+    private object TestSourceStateStore : SourceStateStore {
+        private val cursors: MutableMap<String, SourceCursor> = linkedMapOf()
+        private val liveStates: MutableMap<Int, PublisherLiveStatus> = linkedMapOf()
+
+        fun reset() {
+            cursors.clear()
+            liveStates.clear()
+        }
+
+        override fun findCursor(publisherId: Int, sourceKey: String, eventType: SourceEventType): SourceCursor? {
+            return cursors[cursorKey(publisherId, sourceKey, eventType)]
+        }
+
+        override fun ensureCursorBaseline(
+            publisherId: Int,
+            sourceKey: String,
+            eventType: SourceEventType,
+            timestamp: Long,
+        ): SourceCursor {
+            return findCursor(publisherId, sourceKey, eventType)
+                ?: markCursorSeen(publisherId, sourceKey, eventType, "__baseline__$timestamp", timestamp)
+        }
+
+        override fun markCursorSeen(
+            publisherId: Int,
+            sourceKey: String,
+            eventType: SourceEventType,
+            updateKey: String,
+            timestamp: Long,
+        ): SourceCursor {
+            val key = cursorKey(publisherId, sourceKey, eventType)
+            val recent = LinkedHashSet(cursors[key]?.recentUpdateKeys.orEmpty())
+            recent.add(updateKey)
+            val updated = SourceCursor(
+                publisherId = publisherId,
+                sourceKey = sourceKey,
+                eventType = eventType,
+                lastSeenUpdateKey = updateKey,
+                lastSeenAtEpochSeconds = timestamp,
+                recentUpdateKeys = recent.toList(),
+            )
+            cursors[key] = updated
+            return updated
+        }
+
+        override fun findLatestLiveStatus(publisherId: Int): PublisherLiveStatus? = liveStates[publisherId]
+
+        override fun saveLiveStatus(state: PublisherLiveStatus): PublisherLiveStatus {
+            liveStates[state.publisherId] = state
+            return state
+        }
+
+        private fun cursorKey(publisherId: Int, sourceKey: String, eventType: SourceEventType): String {
+            return "$publisherId|$sourceKey|${eventType.value}"
+        }
+    }
+
+    private object TestSubscriptions : SubscriptionQueryService {
+        private val publishers: MutableMap<Int, Publisher> = linkedMapOf()
+        private val subscribers: MutableMap<Int, Subscriber> = linkedMapOf()
+        private val subscriptions: MutableMap<Pair<Int, Int>, Subscription> = linkedMapOf()
+        private var nextPublisherId = 1
+        private var nextSubscriberId = 1
+        private var nextSubscriptionId = 1
+
+        fun reset() {
+            publishers.clear()
+            subscribers.clear()
+            subscriptions.clear()
+            nextPublisherId = 1
+            nextSubscriberId = 1
+            nextSubscriptionId = 1
+        }
+
+        fun upsertPublisher(info: PublisherInfo): Publisher {
+            val existing = publishers.values.firstOrNull { it.key == info.key }
+            val publisher = Publisher(
+                id = existing?.id ?: nextPublisherId++,
+                key = info.key,
+                name = info.name,
+                official = info.official,
+                state = info.state,
+                avatar = info.avatar,
+                banner = info.banner,
+                pendant = info.pendant,
+                createTime = existing?.createTime ?: 1L,
+                createUser = existing?.createUser ?: 1,
+            )
+            publishers[publisher.id] = publisher
+            return publisher
+        }
+
+        fun upsertSubscriber(address: TargetAddress, name: String): Subscriber {
+            val existing = subscribers.values.firstOrNull { it.address == address }
+            val subscriber = Subscriber(
+                id = existing?.id ?: nextSubscriberId++,
+                address = address,
+                name = name,
+                state = EntityState.ACTIVE,
+                createTime = existing?.createTime ?: 1L,
+                createUser = existing?.createUser ?: 1,
+            )
+            subscribers[subscriber.id] = subscriber
+            return subscriber
+        }
+
+        fun subscribe(subscriber: Subscriber, publisher: Publisher): Subscription {
+            val key = subscriber.id to publisher.id
+            val existing = subscriptions[key]
+            if (existing != null) return existing
+
+            val now = System.currentTimeMillis() / 1000
+            val subscription = Subscription(
+                id = nextSubscriptionId++,
+                subscriberId = subscriber.id,
+                publisherId = publisher.id,
+                createdAtEpochSeconds = now,
+                updatedAtEpochSeconds = now,
+            )
+            subscriptions[key] = subscription
+            return subscription
+        }
+
+        override fun findActivePublisherWithSubscribersById(publisherId: Int): PublisherSubscribers? {
+            val publisher = publishers[publisherId] ?: return null
+            val activeSubscribers = subscriptions.values
+                .filter { it.publisherId == publisherId && it.state == EntityState.ACTIVE }
+                .mapNotNull { subscribers[it.subscriberId] }
+                .filter { it.state == EntityState.ACTIVE }
+            if (activeSubscribers.isEmpty()) return null
+            return PublisherSubscribers(publisher, activeSubscribers)
+        }
+
+        override fun findActivePublishersWithSubscribersBySourcePlatform(
+            platformId: String,
+        ): Map<Publisher, List<Subscriber>> {
+            return publishers.values
+                .filter { it.platformId.value == platformId && it.state == EntityState.ACTIVE }
+                .mapNotNull { publisher ->
+                    val snapshot = findActivePublisherWithSubscribersById(publisher.id) ?: return@mapNotNull null
+                    snapshot.publisher to snapshot.subscribers
+                }
+                .toMap()
+        }
+    }
+
+    private class TestTaskScheduler(
+        private val scope: CoroutineScope,
+    ) : TaskScheduler {
+        private val tasks: MutableMap<String, TaskRuntime> = linkedMapOf()
+
+        override fun start(task: TaskDefinition): Boolean {
+            val existing = tasks[task.id]
+            if (existing?.job?.isActive == true) return false
+
+            val runtime = TaskRuntime(task)
+            runtime.status = TaskStatus.RUNNING
+            runtime.job = scope.launch {
+                try {
+                    runTask(runtime)
+                    if (runtime.status == TaskStatus.RUNNING) {
+                        runtime.status = TaskStatus.COMPLETED
+                    }
+                } catch (_: kotlinx.coroutines.CancellationException) {
+                    runtime.status = TaskStatus.CANCELLED
+                }
+            }
+            tasks[task.id] = runtime
+            return true
+        }
+
+        override suspend fun stop(id: String): Boolean {
+            val runtime = tasks[id] ?: return false
+            val job = runtime.job ?: return false
+            if (!job.isActive) return false
+            job.cancelAndJoin()
+            runtime.status = TaskStatus.CANCELLED
+            return true
+        }
+
+        override suspend fun stopAll() {
+            tasks.keys.toList().forEach { stop(it) }
+        }
+
+        override suspend fun shutdown() {
+            stopAll()
+            tasks.clear()
+        }
+
+        override fun isRunning(id: String): Boolean {
+            return tasks[id]?.job?.isActive == true && tasks[id]?.status == TaskStatus.RUNNING
+        }
+
+        override fun snapshot(id: String): TaskSnapshot? = tasks[id]?.snapshot()
+
+        override fun snapshots(): List<TaskSnapshot> = tasks.values.map { it.snapshot() }.sortedBy { it.id }
+
+        private suspend fun runTask(runtime: TaskRuntime) {
+            when (val schedule = runtime.definition.schedule) {
+                TaskSchedule.Once -> runRound(runtime)
+                is TaskSchedule.FixedDelay -> {
+                    if (!schedule.runImmediately) delayAndRecord(runtime, schedule.delay)
+                    while (true) {
+                        runRound(runtime)
+                        delayAndRecord(runtime, schedule.delay)
+                    }
+                }
+                is TaskSchedule.Cron -> {
+                    delayAndRecord(runtime, schedule.timeToNextRun(java.time.ZonedDateTime.now(schedule.zone)))
+                    runRound(runtime)
+                }
+            }
+        }
+
+        private suspend fun runRound(runtime: TaskRuntime) {
+            runtime.nextRunAtMillis = null
+            runtime.lastRunAtMillis = System.currentTimeMillis()
+            runtime.runCount += 1
+            runtime.definition.action()
+            runtime.lastSuccessAtMillis = System.currentTimeMillis()
+            runtime.lastErrorSummary = null
+        }
+
+        private suspend fun delayAndRecord(runtime: TaskRuntime, duration: Duration) {
+            runtime.nextRunAtMillis = System.currentTimeMillis() + duration.inWholeMilliseconds
+            delay(duration)
+        }
+
+        private class TaskRuntime(
+            val definition: TaskDefinition,
+        ) {
+            var job: Job? = null
+            var status: TaskStatus = TaskStatus.COMPLETED
+            var nextRunAtMillis: Long? = null
+            var lastRunAtMillis: Long? = null
+            var lastSuccessAtMillis: Long? = null
+            var runCount: Long = 0
+            var lastErrorSummary: String? = null
+
+            fun snapshot(): TaskSnapshot = TaskSnapshot(
+                id = definition.id,
+                status = status,
+                nextRunAtMillis = nextRunAtMillis,
+                lastRunAtMillis = lastRunAtMillis,
+                lastSuccessAtMillis = lastSuccessAtMillis,
+                runCount = runCount,
+                lastErrorSummary = lastErrorSummary,
+            )
+        }
+    }
+
     private fun liveSnapshot(
         status: LiveStatus,
         startedAt: Long? = null,
@@ -1392,8 +1679,9 @@ class BilibiliPublisherPluginTest {
     }
 
     private data class SeededSubscription(
-        val publisher: top.colter.dynamic.core.data.Publisher,
-        val subscriber: top.colter.dynamic.core.data.Subscriber,
+        val publisher: Publisher,
+        val subscriber: Subscriber,
+        val subscription: Subscription,
     )
 
     private data class CursorMark(
