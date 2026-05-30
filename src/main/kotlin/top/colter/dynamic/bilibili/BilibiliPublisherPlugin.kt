@@ -44,7 +44,7 @@ import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import top.colter.dynamic.core.plugin.PublisherLookupPlugin
 import top.colter.dynamic.core.plugin.PublisherSourcePlugin
-import top.colter.dynamic.core.repository.SubscriptionRepository
+import top.colter.dynamic.core.plugin.SubscriptionQueryService
 import top.colter.dynamic.core.task.TaskDefinition
 import top.colter.dynamic.core.task.TaskSchedule
 import top.colter.dynamic.core.task.TaskScheduler
@@ -80,12 +80,18 @@ public class BilibiliPublisherPlugin() :
     private var serviceFactory: (Long) -> BilibiliPlatformGateway = { requestIntervalMs ->
         BilibiliPollService(requestIntervalMs)
     }
-    private var cursorStoreFactory: () -> BilibiliCursorStore = { DatabaseBilibiliCursorStore() }
-    private var liveStatusStoreFactory: () -> BilibiliLiveStatusStore = { DatabaseBilibiliLiveStatusStore() }
+    private var cursorStoreFactory: () -> BilibiliCursorStore = {
+        error("Bilibili 游标存储尚未初始化")
+    }
+    private var liveStatusStoreFactory: () -> BilibiliLiveStatusStore = {
+        error("Bilibili 直播状态存储尚未初始化")
+    }
     private var saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> }
     private lateinit var taskScheduler: TaskScheduler
     private lateinit var sourceUpdatePublisher: SourceUpdatePublisher
+    private lateinit var subscriptionQueryService: SubscriptionQueryService
     private var useContextTaskScheduler: Boolean = true
+    private var useContextStateStores: Boolean = true
 
     private val followGroupMutex: Mutex = Mutex()
     private val detectMutex: Mutex = Mutex()
@@ -111,7 +117,7 @@ public class BilibiliPublisherPlugin() :
         loadConfig: (String) -> BilibiliPublisherConfig,
         serviceFactory: (Long) -> BilibiliPlatformGateway,
         cursorStoreFactory: () -> BilibiliCursorStore,
-        liveStatusStoreFactory: () -> BilibiliLiveStatusStore = { DatabaseBilibiliLiveStatusStore() },
+        liveStatusStoreFactory: () -> BilibiliLiveStatusStore,
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
         taskScheduler: TaskScheduler,
     ) : this() {
@@ -123,6 +129,7 @@ public class BilibiliPublisherPlugin() :
         this.saveConfig = saveConfig
         this.taskScheduler = taskScheduler
         this.useContextTaskScheduler = false
+        this.useContextStateStores = false
     }
 
     override val supportedLoginMethods: Set<PublisherLoginMethod> = setOf(
@@ -133,8 +140,13 @@ public class BilibiliPublisherPlugin() :
     override suspend fun onLoad(context: PluginContext) {
         pluginId = context.pluginId
         sourceUpdatePublisher = context.sourceUpdatePublisher
+        subscriptionQueryService = context.subscriptionQueryService
         if (useContextTaskScheduler) {
             taskScheduler = context.taskScheduler
+        }
+        if (useContextStateStores) {
+            cursorStoreFactory = { SourceStateBilibiliCursorStore(context.sourceStateStore) }
+            liveStatusStoreFactory = { SourceStateBilibiliLiveStatusStore(context.sourceStateStore) }
         }
         if (useContextConfigService) {
             loadConfig = { id -> context.configService.loadOrCreate(id) { BilibiliPublisherConfig() } }
@@ -878,7 +890,7 @@ public class BilibiliPublisherPlugin() :
 
     private suspend fun handleSubscribed(event: SubscriptionChangedEvent) {
         val publisherId = event.publisher.id
-        val snapshot = SubscriptionRepository.findActivePublisherWithSubscribersById(publisherId)
+        val snapshot = subscriptionQueryService.findActivePublisherWithSubscribersById(publisherId)
         if (snapshot == null || snapshot.publisher.platformId != platformId) {
             synchronized(publisherLock) {
                 publishers = publishers - publisherId
@@ -903,7 +915,7 @@ public class BilibiliPublisherPlugin() :
 
     private fun handleUnsubscribed(event: SubscriptionChangedEvent) {
         val publisherId = event.publisher.id
-        val snapshot = SubscriptionRepository.findActivePublisherWithSubscribersById(publisherId)
+        val snapshot = subscriptionQueryService.findActivePublisherWithSubscribersById(publisherId)
         synchronized(publisherLock) {
             publishers = if (snapshot == null || snapshot.publisher.platformId != platformId) {
                 publishers - publisherId
@@ -914,7 +926,7 @@ public class BilibiliPublisherPlugin() :
     }
 
     private fun loadActivePublishers() {
-        val loaded = SubscriptionRepository.findActivePublishersWithSubscribersBySourcePlatform(platformId.value)
+        val loaded = subscriptionQueryService.findActivePublishersWithSubscribersBySourcePlatform(platformId.value)
             .keys
             .associateBy { it.id }
         synchronized(publisherLock) {

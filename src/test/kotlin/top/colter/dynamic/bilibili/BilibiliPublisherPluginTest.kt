@@ -33,6 +33,7 @@ import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
 import top.colter.dynamic.core.config.YamlConfigService
+import top.colter.dynamic.core.config.YamlPluginDataStore
 import top.colter.dynamic.core.event.EventBus
 import top.colter.dynamic.core.event.EventBusSourceUpdatePublisher
 import top.colter.dynamic.core.event.Listener
@@ -49,6 +50,8 @@ import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import top.colter.dynamic.core.plugin.PluginContext
 import top.colter.dynamic.core.plugin.PluginDescriptor
+import top.colter.dynamic.core.plugin.RepositorySourceStateStore
+import top.colter.dynamic.core.plugin.RepositorySubscriptionQueryService
 import top.colter.dynamic.core.repository.PersistenceManager
 import top.colter.dynamic.core.repository.PublisherRepository
 import top.colter.dynamic.core.repository.SubscriberRepository
@@ -87,9 +90,12 @@ private fun testPluginContext(eventBus: EventBus = EventBus()): PluginContext {
         ),
         eventBus = eventBus,
         configService = YamlConfigService(createTempDirectory("dynamic-bot-bilibili-config")),
+        dataStore = YamlPluginDataStore("bilibili-publisher", createTempDirectory("dynamic-bot-bilibili-data")),
         scope = scope,
         taskScheduler = TaskScheduler(scope),
         sourceUpdatePublisher = EventBusSourceUpdatePublisher(eventBus),
+        sourceStateStore = RepositorySourceStateStore,
+        subscriptionQueryService = RepositorySubscriptionQueryService,
     )
 }
 

@@ -4,8 +4,7 @@ import java.util.concurrent.ConcurrentHashMap
 import top.colter.dynamic.core.data.PublisherLiveStatus
 import top.colter.dynamic.core.data.SourceCursor
 import top.colter.dynamic.core.data.SourceEventType
-import top.colter.dynamic.core.repository.PublisherLiveStatusRepository
-import top.colter.dynamic.core.repository.SourceCursorRepository
+import top.colter.dynamic.core.plugin.SourceStateStore
 
 internal const val BILIBILI_DYNAMIC_FEED_KEY: String = "dynamic-feed"
 internal const val BILIBILI_LIVE_SOURCE_KEY: String = "live-status"
@@ -18,18 +17,20 @@ internal interface BilibiliCursorStore {
     fun markSeen(publisherId: Int, dynamicId: String, timestamp: Long): SourceCursor
 }
 
-internal class DatabaseBilibiliCursorStore : BilibiliCursorStore {
+internal class SourceStateBilibiliCursorStore(
+    private val sourceStateStore: SourceStateStore,
+) : BilibiliCursorStore {
     private val cache: MutableMap<Int, SourceCursor> = ConcurrentHashMap()
 
     override fun get(publisherId: Int): SourceCursor? {
         cache[publisherId]?.let { return it }
-        return SourceCursorRepository
-            .find(publisherId, BILIBILI_DYNAMIC_FEED_KEY, SourceEventType.DYNAMIC_CREATED)
+        return sourceStateStore
+            .findCursor(publisherId, BILIBILI_DYNAMIC_FEED_KEY, SourceEventType.DYNAMIC_CREATED)
             ?.also { cache[publisherId] = it }
     }
 
     override fun ensureBaseline(publisherId: Int, timestamp: Long): SourceCursor {
-        val updated = SourceCursorRepository.ensureBaseline(
+        val updated = sourceStateStore.ensureCursorBaseline(
             publisherId = publisherId,
             sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
             eventType = SourceEventType.DYNAMIC_CREATED,
@@ -40,7 +41,7 @@ internal class DatabaseBilibiliCursorStore : BilibiliCursorStore {
     }
 
     override fun markSeen(publisherId: Int, dynamicId: String, timestamp: Long): SourceCursor {
-        val updated = SourceCursorRepository.markSeen(
+        val updated = sourceStateStore.markCursorSeen(
             publisherId = publisherId,
             sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
             eventType = SourceEventType.DYNAMIC_CREATED,
@@ -58,19 +59,20 @@ internal interface BilibiliLiveStatusStore {
     fun save(state: PublisherLiveStatus): PublisherLiveStatus
 }
 
-internal class DatabaseBilibiliLiveStatusStore : BilibiliLiveStatusStore {
+internal class SourceStateBilibiliLiveStatusStore(
+    private val sourceStateStore: SourceStateStore,
+) : BilibiliLiveStatusStore {
     private val cache: MutableMap<Int, PublisherLiveStatus> = ConcurrentHashMap()
 
     override fun get(publisherId: Int): PublisherLiveStatus? {
         cache[publisherId]?.let { return it }
-        return PublisherLiveStatusRepository
-            .findByPublisherId(publisherId)
-            .maxByOrNull { it.lastObservedAtEpochSeconds }
+        return sourceStateStore
+            .findLatestLiveStatus(publisherId)
             ?.also { cache[publisherId] = it }
     }
 
     override fun save(state: PublisherLiveStatus): PublisherLiveStatus {
-        val updated = PublisherLiveStatusRepository.upsert(state)
+        val updated = sourceStateStore.saveLiveStatus(state)
         cache[state.publisherId] = updated
         return updated
     }
