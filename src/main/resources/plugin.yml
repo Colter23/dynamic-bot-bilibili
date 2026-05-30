@@ -2,6 +2,6 @@ id: bilibili-publisher
 name: Bilibili Publisher Plugin
 version: 0.0.2
 mainClass: top.colter.dynamic.bilibili.BilibiliPublisherPlugin
-apiVersion: 3.0.0
+apiVersion: 4.0.0
 description: Bilibili publisher plugin with polling and subscription dispatch.
 author: dynamic-bot
