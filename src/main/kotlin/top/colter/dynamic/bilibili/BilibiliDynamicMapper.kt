@@ -434,6 +434,7 @@ internal class BilibiliDynamicMapper {
                 description = label,
                 badge = fallbackBadge,
                 cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                coverRatio = 1f,
                 link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
             ),
         )
@@ -454,7 +455,7 @@ internal class BilibiliDynamicMapper {
 
     private fun AdditionalCommon.toMediaCardBlock(): MediaCardBlock? {
         return MediaCardBlock(
-            style = MediaCardStyle.SMALL,
+            style = MediaCardStyle.MINI,
             role = DynamicBlockRole.ADDITIONAL,
             card = DynamicMediaCard(
                 kind = DynamicMediaCardKind.LINK,
@@ -464,6 +465,7 @@ internal class BilibiliDynamicMapper {
                 description = listOf(desc1, desc2).joinNonBlank(separator = "\n"),
                 badge = headText.takeIfNotBlank() ?: subType,
                 cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                coverRatio = 1f,
                 link = jumpUrl.toNormalizedUrlOrNull() ?: button.jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
             ),
         )
@@ -471,7 +473,7 @@ internal class BilibiliDynamicMapper {
 
     private fun AdditionalUgc.toMediaCardBlock(): MediaCardBlock? {
         return MediaCardBlock(
-            style = MediaCardStyle.SMALL,
+            style = MediaCardStyle.MINI,
             role = DynamicBlockRole.ADDITIONAL,
             card = DynamicMediaCard(
                 kind = DynamicMediaCardKind.VIDEO,
@@ -490,7 +492,7 @@ internal class BilibiliDynamicMapper {
     private fun AdditionalGoods.toMediaCardBlock(): MediaCardBlock? {
         val item = items.firstOrNull() ?: return null
         return MediaCardBlock(
-            style = MediaCardStyle.SMALL,
+            style = MediaCardStyle.MINI,
             role = DynamicBlockRole.ADDITIONAL,
             card = DynamicMediaCard(
                 kind = DynamicMediaCardKind.PRODUCT,
@@ -500,6 +502,7 @@ internal class BilibiliDynamicMapper {
                 description = listOf(item.brief, item.price).joinNonBlank(separator = "\n"),
                 badge = headText,
                 cover = item.cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                coverRatio = 1f,
                 link = item.jumpUrl.toNormalizedUrlOrNull() ?: jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
             ),
         )
