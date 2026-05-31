@@ -9,12 +9,14 @@ class BilibiliPublisherConfigFormTest {
     @Test
     fun `form should expose cookie secret and polling restart fields`() {
         val cookieField = BilibiliPublisherConfigForm.spec.fields.single { it.path == "cookiesJson" }
-        val pollingField = BilibiliPublisherConfigForm.spec.fields.single { it.path == "pollingIntervalMs" }
+        val pollingField = BilibiliPublisherConfigForm.spec.fields.single { it.path == "pollingIntervalSeconds" }
 
         assertTrue(cookieField.secret)
         assertTrue(cookieField.restartRequired)
         assertTrue(pollingField.restartRequired)
-        assertEquals(1_000, pollingField.min)
+        assertEquals(1L, pollingField.min)
+        assertTrue(cookieField.description.isNotBlank())
+        assertTrue(pollingField.description.contains("秒"))
     }
 
     @Test
@@ -25,7 +27,7 @@ class BilibiliPublisherConfigFormTest {
             BilibiliPublisherConfigForm.validate(BilibiliPublisherConfig(fetchLimit = 0))
         }
         assertFailsWith<IllegalArgumentException> {
-            BilibiliPublisherConfigForm.validate(BilibiliPublisherConfig(shortUrlResolveTimeoutMs = 0))
+            BilibiliPublisherConfigForm.validate(BilibiliPublisherConfig(shortUrlResolveTimeoutSeconds = 0.0))
         }
     }
 }

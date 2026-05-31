@@ -212,7 +212,7 @@ class BilibiliPublisherPluginTest {
         val gateway = defaultGateway(
             shortUrlExpansions = mapOf(shortUrl to "https://www.bilibili.com/opus/774783779415785528?share_source=copy_link"),
         )
-        val plugin = testPlugin(gateway, config = testConfig(shortUrlResolveTimeoutMs = 10))
+        val plugin = testPlugin(gateway, config = testConfig(shortUrlResolveTimeoutSeconds = 0.01))
         plugin.init()
 
         val parsed = plugin.parseDynamicLink(shortUrl)
@@ -266,7 +266,7 @@ class BilibiliPublisherPluginTest {
         )
         val plugin = testPlugin(
             gateway,
-            config = testConfig(replayWindowHours = 2, followGroupName = "Bot关注"),
+            config = testConfig(replayWindowMinutes = 120, followGroupName = "Bot关注"),
             taskScheduler = scheduler,
         )
 
@@ -293,7 +293,7 @@ class BilibiliPublisherPluginTest {
         )
         val plugin = testPlugin(
             gateway,
-            config = testConfig(replayWindowHours = 0),
+            config = testConfig(replayWindowMinutes = 0),
             cursorStore = cursorStore,
         )
 
@@ -346,7 +346,7 @@ class BilibiliPublisherPluginTest {
         )
         val plugin = testPlugin(
             gateway,
-            config = testConfig(replayWindowHours = 2),
+            config = testConfig(replayWindowMinutes = 120),
             cursorStore = cursorStore,
         )
 
@@ -402,7 +402,7 @@ class BilibiliPublisherPluginTest {
         )
         val plugin = testPlugin(
             gateway,
-            config = testConfig(replayWindowHours = 2),
+            config = testConfig(replayWindowMinutes = 120),
             cursorStore = cursorStore,
         )
 
@@ -831,7 +831,7 @@ class BilibiliPublisherPluginTest {
         val liveStore = InMemoryLiveStatusStore()
         val plugin = testPlugin(
             gateway,
-            config = testConfig(pollingIntervalMs = 25),
+            config = testConfig(pollingIntervalSeconds = 0.025),
             liveStatusStore = liveStore,
         )
         val sourceUpdates = RecordingSourceUpdatePublisher()
@@ -869,7 +869,7 @@ class BilibiliPublisherPluginTest {
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
             initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
         )
-        val plugin = testPlugin(gateway, config = testConfig(pollingIntervalMs = 25))
+        val plugin = testPlugin(gateway, config = testConfig(pollingIntervalSeconds = 0.025))
         val sourceUpdates = RecordingSourceUpdatePublisher()
         seedPublisherAndSubscriber(policy = livePolicy())
 
@@ -906,7 +906,7 @@ class BilibiliPublisherPluginTest {
         )
         val plugin = testPlugin(
             gateway,
-            config = testConfig(pollingIntervalMs = 25, liveStatusBatchSize = 1),
+            config = testConfig(pollingIntervalSeconds = 0.025, liveStatusBatchSize = 1),
             liveStatusStore = liveStore,
         )
         val sourceUpdates = RecordingSourceUpdatePublisher()
@@ -937,7 +937,7 @@ class BilibiliPublisherPluginTest {
         )
         val plugin = testPlugin(
             gateway,
-            config = testConfig(pollingIntervalMs = 25, liveStatusBatchSize = 1),
+            config = testConfig(pollingIntervalSeconds = 0.025, liveStatusBatchSize = 1),
             liveStatusStore = liveStore,
         )
         val sourceUpdates = RecordingSourceUpdatePublisher()
@@ -984,7 +984,7 @@ class BilibiliPublisherPluginTest {
         )
         val plugin = testPlugin(
             gateway,
-            config = testConfig(pollingIntervalMs = 30_000, liveStatusBatchSize = 2),
+            config = testConfig(pollingIntervalSeconds = 30.0, liveStatusBatchSize = 2),
         )
         seedPublisherAndSubscriber(externalId = "101", targetId = "9001", policy = livePolicy())
         seedPublisherAndSubscriber(externalId = "102", targetId = "9002", policy = livePolicy())
@@ -1008,7 +1008,7 @@ class BilibiliPublisherPluginTest {
         )
         val plugin = testPlugin(
             gateway,
-            config = testConfig(pollingIntervalMs = 30_000),
+            config = testConfig(pollingIntervalSeconds = 30.0),
         )
         seedPublisherAndSubscriber()
 
@@ -1030,7 +1030,7 @@ class BilibiliPublisherPluginTest {
         )
         val plugin = testPlugin(
             gateway,
-            config = testConfig(pollingIntervalMs = 30_000),
+            config = testConfig(pollingIntervalSeconds = 30.0),
         )
         seedPublisherAndSubscriber(policy = livePolicy())
 
@@ -1137,22 +1137,22 @@ class BilibiliPublisherPluginTest {
     }
 
     private fun testConfig(
-        replayWindowHours: Int = 0,
+        replayWindowMinutes: Int = 0,
         followGroupName: String = "",
         fetchLimit: Int = 5,
-        pollingIntervalMs: Long = 30_000,
-        requestIntervalMs: Long = 0,
-        shortUrlResolveTimeoutMs: Long = 3_000,
+        pollingIntervalSeconds: Double = 30.0,
+        requestIntervalSeconds: Double = 0.0,
+        shortUrlResolveTimeoutSeconds: Double = 3.0,
         liveDetectionEnabled: Boolean = true,
         liveStatusBatchSize: Int = 50,
     ): BilibiliPublisherConfig {
         return BilibiliPublisherConfig(
-            pollingIntervalMs = pollingIntervalMs,
+            pollingIntervalSeconds = pollingIntervalSeconds,
             fetchLimit = fetchLimit,
-            requestIntervalMs = requestIntervalMs,
-            replayWindowHours = replayWindowHours,
+            requestIntervalSeconds = requestIntervalSeconds,
+            replayWindowMinutes = replayWindowMinutes,
             followGroupName = followGroupName,
-            shortUrlResolveTimeoutMs = shortUrlResolveTimeoutMs,
+            shortUrlResolveTimeoutSeconds = shortUrlResolveTimeoutSeconds,
             liveDetectionEnabled = liveDetectionEnabled,
             liveStatusBatchSize = liveStatusBatchSize,
         )

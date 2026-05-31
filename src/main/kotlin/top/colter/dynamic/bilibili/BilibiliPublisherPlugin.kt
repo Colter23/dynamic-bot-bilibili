@@ -52,7 +52,8 @@ import top.colter.dynamic.core.task.TaskSchedule
 import top.colter.dynamic.core.task.TaskScheduler
 import top.colter.dynamic.core.tools.loggerFor
 import java.net.URI
-import kotlin.time.Duration.Companion.milliseconds
+import kotlin.math.roundToLong
+import kotlin.time.Duration.Companion.seconds
 
 private val logger = loggerFor<BilibiliPublisherPlugin>()
 
@@ -158,13 +159,13 @@ public class BilibiliPublisherPlugin() :
             saveConfig = { id, next -> context.configService.save(id, next) }
         }
         config = loadConfig(pluginId)
-        pollService = serviceFactory(config.requestIntervalMs)
+        pollService = serviceFactory(secondsToMillis(config.requestIntervalSeconds, minimumMillis = 0))
         mapper = BilibiliDynamicMapper()
         cursorStore = cursorStoreFactory()
         liveStatusStore = liveStatusStoreFactory()
         detectTask = TaskDefinition(
             id = detectTaskId,
-            schedule = TaskSchedule.FixedDelay(config.pollingIntervalMs.milliseconds, runImmediately = true),
+            schedule = TaskSchedule.FixedDelay(config.pollingIntervalSeconds.seconds, runImmediately = true),
             action = {
                 detectAndPublish()
             },
@@ -212,8 +213,8 @@ public class BilibiliPublisherPlugin() :
         }
 
         val restartTargets = if (
-            previous.pollingIntervalMs != next.pollingIntervalMs ||
-            previous.requestIntervalMs != next.requestIntervalMs ||
+            previous.pollingIntervalSeconds != next.pollingIntervalSeconds ||
+            previous.requestIntervalSeconds != next.requestIntervalSeconds ||
             previous.cookiesJson != next.cookiesJson
         ) {
             listOf("Bilibili 插件")
@@ -322,7 +323,10 @@ public class BilibiliPublisherPlugin() :
         if (!isBilibiliShortUrl(normalizedInput)) return null
 
         val expanded = runCatching {
-            pollService.expandShortUrl(normalizedInput, config.shortUrlResolveTimeoutMs)
+            pollService.expandShortUrl(
+                normalizedInput,
+                secondsToMillis(config.shortUrlResolveTimeoutSeconds, minimumMillis = 1),
+            )
         }.onFailure {
             logger.warn(it) {
                 "Bilibili 短链解析失败：url=$normalizedInput"
@@ -473,7 +477,7 @@ public class BilibiliPublisherPlugin() :
                     "Bilibili 关注分组初始化失败"
                 }
             }
-        if (config.replayWindowHours > 0 && allowReplay) {
+        if (config.replayWindowMinutes > 0 && allowReplay) {
             runCatching { replayMissingDynamics() }
                 .onFailure {
                     logger.warn {
@@ -716,7 +720,7 @@ public class BilibiliPublisherPlugin() :
     }
 
     private suspend fun replayMissingDynamics() {
-        if (config.replayWindowHours <= 0) return
+        if (config.replayWindowMinutes <= 0) return
         val publisherSnapshot = dynamicPublishers
         if (publisherSnapshot.isEmpty()) return
 
@@ -724,7 +728,7 @@ public class BilibiliPublisherPlugin() :
         val targets = publisherSnapshot.values.mapNotNull { publisher ->
             val userId = publisher.externalId.toLongOrNull() ?: return@mapNotNull null
             val cursor = cursorStore.get(publisher.id) ?: return@mapNotNull null
-            val lowerBound = cursor.replayLowerBoundAtEpochSeconds(config.replayWindowHours, nowEpochSeconds) ?: return@mapNotNull null
+            val lowerBound = cursor.replayLowerBoundAtEpochSeconds(config.replayWindowMinutes, nowEpochSeconds) ?: return@mapNotNull null
             ReplayTarget(
                 publisher = publisher,
                 userId = userId,
@@ -1169,6 +1173,11 @@ public class BilibiliPublisherPlugin() :
 
     private fun top.colter.dynamic.core.data.PublisherInfo.displayLabel(): String {
         return name.takeIf { it.isNotBlank() } ?: externalId
+    }
+
+    private fun secondsToMillis(seconds: Double, minimumMillis: Long): Long {
+        if (seconds <= 0.0 && minimumMillis <= 0) return 0
+        return (seconds * 1_000.0).roundToLong().coerceAtLeast(minimumMillis)
     }
 
     private fun PublisherSubscribers.hasLiveEventSubscription(): Boolean {
