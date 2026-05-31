@@ -246,7 +246,7 @@ class BilibiliDynamicMapperTest {
     }
 
     @Test
-    fun `map should use official badge resource for verified author`() {
+    fun `map should use avatar badge key for verified author`() {
         val source = dynamic(
             id = "300",
             type = OriginDynamicType.WORD,
@@ -260,11 +260,11 @@ class BilibiliDynamicMapperTest {
 
         val update = assertNotNull(mapper.map(source, fallbackPublisher()))
 
-        assertEquals(BILIBILI_OFFICIAL_BADGE_RESOURCE, update.publisher.official)
+        assertEquals(BILIBILI_OFFICIAL_INDIVIDUAL_BADGE_KEY, update.publisher.avatarBadgeKey)
     }
 
     @Test
-    fun `map should clear official badge when author is not verified`() {
+    fun `map should clear avatar badge key when author is not verified`() {
         val source = dynamic(
             id = "301",
             type = OriginDynamicType.WORD,
@@ -279,19 +279,31 @@ class BilibiliDynamicMapperTest {
         val update = assertNotNull(
             mapper.map(
                 source,
-                fallbackPublisher(official = BILIBILI_OFFICIAL_BADGE_RESOURCE),
+                fallbackPublisher(avatarBadgeKey = BILIBILI_OFFICIAL_INDIVIDUAL_BADGE_KEY),
             )
         )
 
-        assertNull(update.publisher.official)
+        assertNull(update.publisher.avatarBadgeKey)
     }
 
     @Test
-    fun `official badge helper should return null for absent verify`() {
+    fun `avatar badge helper should return null for absent verify`() {
         val official: OfficialVerify? = null
 
-        assertNull(official.toOfficialBadgeResource())
-        assertNull(OfficialVerify(type = OfficialVerifyType.NONE).toOfficialBadgeResource())
+        assertNull(official.toAvatarBadgeKey())
+        assertNull(OfficialVerify(type = OfficialVerifyType.NONE).toAvatarBadgeKey())
+    }
+
+    @Test
+    fun `avatar badge helper should map non individual verify to institution key`() {
+        val institutionType = enumValues<OfficialVerifyType>()
+            .firstOrNull { it != OfficialVerifyType.NONE && it != OfficialVerifyType.INDIVIDUAL }
+            ?: return
+
+        assertEquals(
+            BILIBILI_OFFICIAL_INSTITUTION_BADGE_KEY,
+            OfficialVerify(type = institutionType).toAvatarBadgeKey(),
+        )
     }
 
     private fun dynamic(
@@ -328,12 +340,12 @@ class BilibiliDynamicMapperTest {
         )
     }
 
-    private fun fallbackPublisher(official: String? = null): Publisher {
+    private fun fallbackPublisher(avatarBadgeKey: String? = null): Publisher {
         return Publisher(
             id = 1,
             key = PublisherKey.of(platformId = "bilibili", externalId = "42"),
             name = "fallback",
-            official = official,
+            avatarBadgeKey = avatarBadgeKey,
             avatar = MediaRef("https://example.com/fallback.png", MediaKind.AVATAR),
             createTime = 0,
             createUser = 0,

@@ -1,7 +1,33 @@
 id: bilibili-publisher
-name: Bilibili Publisher Plugin
+name: Bilibili 动态源插件
 version: 0.0.2
 mainClass: top.colter.dynamic.bilibili.BilibiliPublisherPlugin
 apiVersion: 4.0.0
-description: Bilibili publisher plugin with polling and subscription dispatch.
+description: Bilibili 动态轮询、登录与订阅分发。
 author: dynamic-bot
+drawAssets:
+  - platformId: bilibili
+    key: default.header
+    kind: DEFAULT_HEADER
+    resourcePath: draw/bilibili/header/default.png
+    mimeType: image/png
+  - platformId: bilibili
+    key: logo.primary
+    kind: LOGO
+    resourcePath: draw/bilibili/logo/primary.png
+    mimeType: image/png
+  - platformId: bilibili
+    key: logo.wordmark
+    kind: LOGO
+    resourcePath: draw/bilibili/logo/wordmark.png
+    mimeType: image/png
+  - platformId: bilibili
+    key: avatarBadge.official.individual
+    kind: AVATAR_BADGE
+    resourcePath: draw/bilibili/avatar-badge/official-individual.svg
+    mimeType: image/svg+xml
+  - platformId: bilibili
+    key: avatarBadge.official.institution
+    kind: AVATAR_BADGE
+    resourcePath: draw/bilibili/avatar-badge/official-institution.svg
+    mimeType: image/svg+xml

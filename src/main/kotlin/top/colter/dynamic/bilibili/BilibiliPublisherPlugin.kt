@@ -238,7 +238,7 @@ public class BilibiliPublisherPlugin() :
         return PublisherInfo(
             key = PublisherKey.of(platformId.value, PublisherKind.USER, snapshot.userId),
             name = snapshot.name,
-            official = snapshot.official,
+            avatarBadgeKey = snapshot.avatarBadgeKey,
             state = EntityState.ACTIVE,
             avatar = MediaRef(snapshot.faceUrl, MediaKind.AVATAR),
             banner = snapshot.headerUrl?.let { MediaRef(it, MediaKind.COVER) },

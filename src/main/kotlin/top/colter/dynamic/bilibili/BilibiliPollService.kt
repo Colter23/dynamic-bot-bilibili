@@ -42,7 +42,7 @@ import java.net.URI
 internal data class BilibiliPublisherSnapshot(
     val userId: String,
     val name: String,
-    val official: String? = null,
+    val avatarBadgeKey: String? = null,
     val faceUrl: String,
     val headerUrl: String? = null,
     val pendantUrl: String? = null,
@@ -204,7 +204,7 @@ internal class BilibiliPollService(
         return BilibiliPublisherSnapshot(
             userId = info.mid.toString(),
             name = info.name,
-            official = info.official.toOfficialBadgeResource(),
+            avatarBadgeKey = info.official.toAvatarBadgeKey(),
             faceUrl = info.face.url,
             headerUrl = info.header.url,
             pendantUrl = info.pendant?.image?.url?.takeIf { it.isNotBlank() },

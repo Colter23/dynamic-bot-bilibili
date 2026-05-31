@@ -129,7 +129,7 @@ class BilibiliPublisherPluginTest {
             snapshot = BilibiliPublisherSnapshot(
                 userId = "123",
                 name = "demo-up",
-                official = "official",
+                avatarBadgeKey = "avatarBadge.official.individual",
                 faceUrl = "https://example.com/face.png",
                 headerUrl = "https://example.com/header.png",
                 pendantUrl = "https://example.com/pendant.png",
@@ -1617,7 +1617,7 @@ class BilibiliPublisherPluginTest {
                 id = existing?.id ?: nextPublisherId++,
                 key = info.key,
                 name = info.name,
-                official = info.official,
+                avatarBadgeKey = info.avatarBadgeKey,
                 state = info.state,
                 avatar = info.avatar,
                 banner = info.banner,

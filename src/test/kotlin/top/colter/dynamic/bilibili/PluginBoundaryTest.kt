@@ -5,6 +5,7 @@ import java.nio.file.Path
 import kotlin.io.path.isRegularFile
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 
 class PluginBoundaryTest {
     @Test
@@ -36,5 +37,20 @@ class PluginBoundaryTest {
             .sorted()
 
         assertEquals(emptyList(), offenders)
+    }
+
+    @Test
+    fun `bilibili draw assets should be packaged with plugin`() {
+        val resources = listOf(
+            "draw/bilibili/header/default.png",
+            "draw/bilibili/logo/primary.png",
+            "draw/bilibili/logo/wordmark.png",
+            "draw/bilibili/avatar-badge/official-individual.svg",
+            "draw/bilibili/avatar-badge/official-institution.svg",
+        )
+
+        resources.forEach { path ->
+            assertNotNull(javaClass.classLoader.getResource(path), "缺少插件绘图资源：$path")
+        }
     }
 }
