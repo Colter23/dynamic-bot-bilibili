@@ -416,7 +416,7 @@ public class BilibiliPublisherPlugin() :
         if (dynamicPublisherSnapshot.isNotEmpty()) {
             val start = System.currentTimeMillis()
             val followedDynamics = runCatching {
-                pollService.fetchNewDynamicPage(1).items.take(config.fetchLimit.coerceAtLeast(0))
+                pollService.fetchNewDynamicPage(1).items
             }
                 .onFailure {
                     logger.warn(it) {
@@ -508,7 +508,7 @@ public class BilibiliPublisherPlugin() :
         val publisherSnapshot = dynamicPublishers
         if (publisherSnapshot.isEmpty()) return
 
-        val followedDynamics = runCatching { pollService.fetchNewDynamicPage(1).items.take(config.fetchLimit.coerceAtLeast(0)) }
+        val followedDynamics = runCatching { pollService.fetchNewDynamicPage(1).items }
             .onFailure {
                 logger.warn(it) {
                     "Bilibili 动态游标预热拉取失败"

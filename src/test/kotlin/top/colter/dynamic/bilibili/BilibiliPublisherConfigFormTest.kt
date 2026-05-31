@@ -24,7 +24,7 @@ class BilibiliPublisherConfigFormTest {
         BilibiliPublisherConfigForm.validate(BilibiliPublisherConfig())
 
         assertFailsWith<IllegalArgumentException> {
-            BilibiliPublisherConfigForm.validate(BilibiliPublisherConfig(fetchLimit = 0))
+            BilibiliPublisherConfigForm.validate(BilibiliPublisherConfig(pollingIntervalSeconds = 0.0))
         }
         assertFailsWith<IllegalArgumentException> {
             BilibiliPublisherConfigForm.validate(BilibiliPublisherConfig(shortUrlResolveTimeoutSeconds = 0.0))

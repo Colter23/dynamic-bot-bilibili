@@ -6,7 +6,6 @@ import top.colter.dynamic.core.config.ConfigFormSpec
 
 public data class BilibiliPublisherConfig(
     val pollingIntervalSeconds: Double = 15.0,
-    val fetchLimit: Int = 5,
     val requestIntervalSeconds: Double = 0.5,
     val replayWindowMinutes: Int = 0,
     val followGroupName: String = "",
@@ -26,25 +25,17 @@ public object BilibiliPublisherConfigForm {
                 label = "轮询间隔（秒）",
                 type = ConfigFieldType.NUMBER,
                 section = "轮询",
-                description = "检测关注 UP 主新动态和直播状态的固定间隔；支持小数。",
+                description = "检测关注 UP 主新动态和直播状态的固定间隔；支持小数，例如 1.5 表示 1.5 秒。",
                 min = 1,
                 restartRequired = true,
                 restartTarget = "Bilibili 插件",
-            ),
-            ConfigFieldSpec(
-                path = "fetchLimit",
-                label = "每次拉取数量",
-                type = ConfigFieldType.NUMBER,
-                section = "轮询",
-                description = "每次轮询动态列表时读取的最新动态数量，数量越大越不容易漏掉短时间内的多条动态。",
-                min = 1,
             ),
             ConfigFieldSpec(
                 path = "requestIntervalSeconds",
                 label = "请求间隔（秒）",
                 type = ConfigFieldType.NUMBER,
                 section = "轮询",
-                description = "连续调用 Bilibili 接口之间的等待时间；支持小数。",
+                description = "连续调用 Bilibili 接口之间的等待时间；支持小数，例如 0.5 表示 0.5 秒。",
                 min = 0,
                 restartRequired = true,
                 restartTarget = "Bilibili 插件",
@@ -69,7 +60,7 @@ public object BilibiliPublisherConfigForm {
                 label = "短链接解析超时（秒）",
                 type = ConfigFieldType.NUMBER,
                 section = "链接",
-                description = "解析 b23.tv 等短链接时等待跳转结果的超时时间；支持小数。",
+                description = "解析 b23.tv 等短链接时等待跳转结果的超时时间；支持小数，例如 0.5 表示 0.5 秒。",
                 min = 0,
             ),
             ConfigFieldSpec(
@@ -102,7 +93,6 @@ public object BilibiliPublisherConfigForm {
 
     public fun validate(config: BilibiliPublisherConfig) {
         require(config.pollingIntervalSeconds >= 1.0) { "轮询间隔不能小于 1 秒" }
-        require(config.fetchLimit >= 1) { "每次拉取数量不能小于 1" }
         require(config.requestIntervalSeconds >= 0.0) { "请求间隔不能为负数" }
         require(config.replayWindowMinutes >= 0) { "补发时间窗口不能为负数" }
         require(config.shortUrlResolveTimeoutSeconds > 0.0) { "短链接解析超时必须大于 0 秒" }

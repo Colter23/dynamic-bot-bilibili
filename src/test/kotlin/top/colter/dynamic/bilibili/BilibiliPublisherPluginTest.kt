@@ -1139,7 +1139,6 @@ class BilibiliPublisherPluginTest {
     private fun testConfig(
         replayWindowMinutes: Int = 0,
         followGroupName: String = "",
-        fetchLimit: Int = 5,
         pollingIntervalSeconds: Double = 30.0,
         requestIntervalSeconds: Double = 0.0,
         shortUrlResolveTimeoutSeconds: Double = 3.0,
@@ -1148,7 +1147,6 @@ class BilibiliPublisherPluginTest {
     ): BilibiliPublisherConfig {
         return BilibiliPublisherConfig(
             pollingIntervalSeconds = pollingIntervalSeconds,
-            fetchLimit = fetchLimit,
             requestIntervalSeconds = requestIntervalSeconds,
             replayWindowMinutes = replayWindowMinutes,
             followGroupName = followGroupName,
