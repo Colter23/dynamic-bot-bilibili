@@ -29,17 +29,18 @@ import top.colter.bilibili.data.dynamic.type.OriginDynamicType
 import top.colter.bilibili.data.dynamic.type.RichTextType
 import top.colter.bilibili.data.user.OfficialVerify
 import top.colter.bilibili.data.user.OfficialVerifyType
-import top.colter.dynamic.core.data.CardAttachment
 import top.colter.dynamic.core.data.DynamicContentNodeEmoji
 import top.colter.dynamic.core.data.DynamicContentNodeTag
-import top.colter.dynamic.core.data.DynamicLabelKind
 import top.colter.dynamic.core.data.DynamicPayload
 import top.colter.dynamic.core.data.DynamicReferenceKind
-import top.colter.dynamic.core.data.ImageAttachment
+import top.colter.dynamic.core.data.ImageGridBlock
+import top.colter.dynamic.core.data.MediaCardBlock
+import top.colter.dynamic.core.data.MediaCardStyle
 import top.colter.dynamic.core.data.Publisher
 import top.colter.dynamic.core.data.PublisherKey
+import top.colter.dynamic.core.data.RepostBlock
 import top.colter.dynamic.core.data.SourceEventType
-import top.colter.dynamic.core.data.VideoAttachment
+import top.colter.dynamic.core.data.TextBlock
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
 
@@ -107,12 +108,13 @@ class BilibiliDynamicMapperTest {
         assertEquals(SourceEventType.DYNAMIC_CREATED, update.eventType)
         assertEquals("123456789", update.key.externalId)
         assertEquals(123L, update.occurredAtEpochSeconds)
-        assertEquals("hello [ok]#topic#", mapped.content?.plainText)
-        assertIs<DynamicContentNodeEmoji>(mapped.content?.nodes?.get(1))
-        val topic = assertIs<DynamicContentNodeTag>(mapped.content?.nodes?.get(2))
+        val textBlock = mapped.blocks.filterIsInstance<TextBlock>().single()
+        assertEquals("hello [ok]#topic#", textBlock.content.plainText)
+        assertIs<DynamicContentNodeEmoji>(textBlock.content.nodes[1])
+        val topic = assertIs<DynamicContentNodeTag>(textBlock.content.nodes[2])
         assertEquals("https://search.bilibili.com/all?keyword=topic", topic.url)
-        val imageAttachment = mapped.attachments.filterIsInstance<ImageAttachment>().single()
-        assertEquals("https://example.com/pic.png", imageAttachment.images.single().image.uri)
+        val imageBlock = mapped.blocks.filterIsInstance<ImageGridBlock>().single()
+        assertEquals("https://example.com/pic.png", imageBlock.images.single().image.uri)
         assertEquals("42", mapped.metric("like"))
         assertEquals("12", mapped.metric("comment"))
         assertEquals("2k", mapped.metric("forward"))
@@ -182,22 +184,65 @@ class BilibiliDynamicMapperTest {
         val update = assertNotNull(mapper.map(source, fallbackPublisher()))
         val mapped = assertIs<DynamicPayload>(update.payload)
 
-        val video = mapped.attachments.filterIsInstance<VideoAttachment>().single()
-        assertEquals("BV123", video.id)
-        assertEquals("https://www.bilibili.com/video/BV123", video.link)
-        val smallCard = mapped.attachments
-            .filterIsInstance<CardAttachment>()
-            .single { it.cardKind == "additional_ugc" }
-        assertEquals("related", smallCard.id)
-        val topicLabel = mapped.labels.single { it.sourceKey == "dynamic.topic" }
-        assertEquals(DynamicLabelKind.TAG, topicLabel.kind)
-        assertEquals("topic", topicLabel.text)
+        val video = mapped.blocks.filterIsInstance<MediaCardBlock>().single { it.card.sourceKind == "bilibili.major.video" }
+        assertEquals(MediaCardStyle.LARGE, video.style)
+        assertEquals("BV123", video.card.id)
+        assertEquals("https://www.bilibili.com/video/BV123", video.card.link)
+        val smallCard = mapped.blocks
+            .filterIsInstance<MediaCardBlock>()
+            .single { it.card.sourceKind == "bilibili.additional.ugc" }
+        assertEquals(MediaCardStyle.SMALL, smallCard.style)
+        assertEquals("related", smallCard.card.id)
+        val topic = assertIs<TextBlock>(mapped.blocks.first()).content.nodes.first()
+        assertEquals("#topic#", topic.text)
 
-        val mappedOrigin = mapped.references.single { it.kind == DynamicReferenceKind.ORIGIN }.embedded
+        val mappedOrigin = assertIs<RepostBlock>(
+            mapped.blocks.single { it is RepostBlock && it.referenceKind == DynamicReferenceKind.ORIGIN },
+        ).embedded
         val originPayload = assertIs<DynamicPayload>(mappedOrigin?.payload)
-        val originCard = originPayload.attachments.filterIsInstance<CardAttachment>().single()
-        assertEquals("article", originCard.cardKind)
+        val originCard = originPayload.blocks.filterIsInstance<MediaCardBlock>().single()
+        assertEquals("bilibili.major.article", originCard.card.sourceKind)
         assertEquals("88", mappedOrigin?.publisher?.externalId)
+    }
+
+    @Test
+    fun `map should make video small inside forwarded origin`() {
+        val origin = dynamic(
+            id = "101",
+            type = OriginDynamicType.AV,
+            dynamic = ModuleDynamic(
+                major = DynamicMajor(
+                    type = MajorType.ARCHIVE,
+                    video = MajorVideo(
+                        type = 1,
+                        aid = 10,
+                        bvid = "BV999",
+                        title = "origin video",
+                        cover = BiliLazyImage("https://example.com/origin-video.png"),
+                        description = "origin body",
+                        duration = "03:21",
+                        jumpUrl = "//www.bilibili.com/video/BV999",
+                        stats = BiliMediaStats(danmaku = "6", play = "5"),
+                        badge = Badge(bgColor = "", color = "", text = "video"),
+                    ),
+                ),
+            ),
+        )
+        val source = dynamic(
+            id = "201",
+            type = OriginDynamicType.FORWARD,
+            dynamic = ModuleDynamic(desc = DynamicDesc(richTextNodes = emptyList(), text = "forward")),
+            origin = origin,
+        )
+
+        val mapped = assertIs<DynamicPayload>(assertNotNull(mapper.map(source, fallbackPublisher())).payload)
+        val originPayload = assertIs<DynamicPayload>(
+            assertIs<RepostBlock>(mapped.blocks.filterIsInstance<RepostBlock>().single()).embedded?.payload,
+        )
+        val originVideo = originPayload.blocks.filterIsInstance<MediaCardBlock>().single()
+
+        assertEquals("bilibili.major.video", originVideo.card.sourceKind)
+        assertEquals(MediaCardStyle.SMALL, originVideo.style)
     }
 
     @Test

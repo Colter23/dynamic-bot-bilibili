@@ -23,8 +23,8 @@ import top.colter.bilibili.data.dynamic.major.MajorVideo
 import top.colter.bilibili.data.dynamic.module.ModuleAuthor
 import top.colter.bilibili.data.dynamic.module.ModuleStats
 import top.colter.bilibili.data.dynamic.type.RichTextType
-import top.colter.dynamic.core.data.CardAttachment
-import top.colter.dynamic.core.data.DynamicAttachment
+import top.colter.dynamic.core.data.DynamicBlock
+import top.colter.dynamic.core.data.DynamicBlockRole
 import top.colter.dynamic.core.data.DynamicContent
 import top.colter.dynamic.core.data.DynamicContentNode
 import top.colter.dynamic.core.data.DynamicContentNodeEmoji
@@ -35,25 +35,29 @@ import top.colter.dynamic.core.data.DynamicContentNodeText
 import top.colter.dynamic.core.data.DynamicContentTagType
 import top.colter.dynamic.core.data.DynamicLabel
 import top.colter.dynamic.core.data.DynamicLabelKind
+import top.colter.dynamic.core.data.DynamicMediaCard
+import top.colter.dynamic.core.data.DynamicMediaCardKind
 import top.colter.dynamic.core.data.DynamicMetric
 import top.colter.dynamic.core.data.DynamicPayload
 import top.colter.dynamic.core.data.DynamicReferenceKind
-import top.colter.dynamic.core.data.ImageAttachment
+import top.colter.dynamic.core.data.ImageGridBlock
 import top.colter.dynamic.core.data.ImageItem
+import top.colter.dynamic.core.data.MediaCardBlock
+import top.colter.dynamic.core.data.MediaCardStyle
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.PlatformCapability
 import top.colter.dynamic.core.data.PlatformDescriptor
-import top.colter.dynamic.core.data.PollAttachment
+import top.colter.dynamic.core.data.PollBlock
 import top.colter.dynamic.core.data.Publisher
+import top.colter.dynamic.core.data.PublisherInfo
 import top.colter.dynamic.core.data.PublisherKey
 import top.colter.dynamic.core.data.PublisherKind
-import top.colter.dynamic.core.data.PublisherInfo
+import top.colter.dynamic.core.data.RepostBlock
 import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.data.SourceUpdate
-import top.colter.dynamic.core.data.SourceUpdateReference
+import top.colter.dynamic.core.data.TextBlock
 import top.colter.dynamic.core.data.UpdateKey
-import top.colter.dynamic.core.data.VideoAttachment
 
 internal class BilibiliDynamicMapper {
     fun map(source: BiliDynamic, fallbackPublisher: Publisher): SourceUpdate? {
@@ -78,10 +82,8 @@ internal class BilibiliDynamicMapper {
             payload = DynamicPayload(
                 labels = buildLabels(source),
                 title = buildTitle(source),
-                content = buildContent(source),
-                attachments = buildAttachments(source),
+                blocks = buildBlocks(source, fallbackPublisher, depth),
                 metrics = buildMetrics(source.modules.stat),
-                references = buildReferences(source, fallbackPublisher, depth),
             ),
         )
     }
@@ -110,7 +112,6 @@ internal class BilibiliDynamicMapper {
             source.modules.dispute?.title.toLabel(DynamicLabelKind.WARNING, "module.dispute"),
             source.modules.fold?.statement.toLabel(DynamicLabelKind.WARNING, "module.fold"),
             source.modules.dynamic.major?.none?.tips.toLabel(DynamicLabelKind.WARNING, "major.none"),
-            source.modules.dynamic.topic?.name.toLabel(DynamicLabelKind.TAG, "dynamic.topic"),
         )
     }
 
@@ -118,18 +119,55 @@ internal class BilibiliDynamicMapper {
         return source.modules.dynamic.major?.opus?.title.takeIfNotBlank()
     }
 
-    private fun buildContent(source: BiliDynamic): DynamicContent? {
-        val desc = source.modules.dynamic.desc ?: source.modules.dynamic.major?.opus?.summary ?: return null
-        return desc.toDynamicContent()
+    private fun buildBlocks(source: BiliDynamic, fallbackPublisher: Publisher, depth: Int): List<DynamicBlock> {
+        val major = source.modules.dynamic.major
+        return buildList {
+            buildContent(source)?.let { add(TextBlock(it)) }
+            major?.buildPics()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { add(ImageGridBlock(images = it, sourceKind = major.imageSourceKind())) }
+            major?.buildMediaCards(source, depth)?.let(::addAll)
+            buildRepost(source, fallbackPublisher, depth)?.let(::add)
+            source.modules.dynamic.additional?.buildAdditionalBlocks()?.let(::addAll)
+        }
     }
 
-    private fun DynamicDesc.toDynamicContent(): DynamicContent? {
+    private fun buildContent(source: BiliDynamic): DynamicContent? {
+        val desc = source.modules.dynamic.desc ?: source.modules.dynamic.major?.opus?.summary
+        val fallbackText = source.modules.dynamic.major?.blocked?.hintMessage.takeIfNotBlank()
+        val descNodes = desc?.toDynamicContentNodes()
+            ?: fallbackText?.let { listOf(DynamicContentNodeText(it)) }
+            ?: emptyList()
+        val topicNode = source.modules.dynamic.topic?.let { topic ->
+            val topicText = topic.name.takeIfNotBlank() ?: return@let null
+            DynamicContentNodeTag(
+                text = topicText.ensureTopicText(),
+                tagType = DynamicContentTagType.TOPIC,
+                externalId = topic.id.takeIf { it > 0 }?.toString(),
+                url = topic.jumpUrl.toNormalizedUrlOrNull(),
+            )
+        }
+        val resolvedDescNodes = if (topicNode == null) {
+            descNodes
+        } else {
+            descNodes.filterNot { node ->
+                node is DynamicContentNodeTag && node.text.trim() == topicNode.text
+            }
+        }
+        val nodes = buildList {
+            topicNode?.let { add(it) }
+            if (topicNode != null && resolvedDescNodes.isNotEmpty()) add(DynamicContentNodeText("\n"))
+            addAll(resolvedDescNodes)
+        }
+        return nodes.takeIf { it.isNotEmpty() }?.let { DynamicContent(it) }
+    }
+
+    private fun DynamicDesc.toDynamicContentNodes(): List<DynamicContentNode> {
         val nodes = richTextNodes.mapNotNull { it.toDynamicContentNode() }
         val fallbackText = text.takeIfNotBlank()
-        val resolvedNodes = nodes.ifEmpty {
+        return nodes.ifEmpty {
             fallbackText?.let { listOf(DynamicContentNodeText(it)) }.orEmpty()
         }
-        return resolvedNodes.takeIf { it.isNotEmpty() }?.let { DynamicContent(nodes = it) }
     }
 
     private fun RichTextNode.toDynamicContentNode(): DynamicContentNode? {
@@ -168,29 +206,27 @@ internal class BilibiliDynamicMapper {
         }
     }
 
-    private fun buildAttachments(source: BiliDynamic): List<DynamicAttachment> {
-        val major = source.modules.dynamic.major
-        return buildList {
-            major?.buildPics()
-                ?.takeIf { it.isNotEmpty() }
-                ?.let { add(ImageAttachment(images = it)) }
-            major?.buildVideo(source)?.let(::add)
-            major?.buildLargeCard(source)?.let(::add)
-            (major?.buildSmallCard(source) ?: source.modules.dynamic.additional?.buildSmallCard())?.let(::add)
-            major?.buildMiniCard(source)?.let(::add)
-            source.modules.dynamic.additional?.buildPoll()?.let(::add)
-        }
-    }
-
     private fun DynamicMajor.buildPics(): List<ImageItem>? {
         val drawPics = draw?.images
             ?.mapNotNull { it.toImageItem() }
             ?.takeIf { it.isNotEmpty() }
         if (drawPics != null) return drawPics
 
-        return opus?.pics
+        val opusPics = opus?.pics
             ?.mapNotNull { it.toImageItem() }
             ?.takeIf { it.isNotEmpty() }
+        if (opusPics != null) return opusPics
+
+        return blocked?.toImageItem()?.let(::listOf)
+    }
+
+    private fun DynamicMajor.imageSourceKind(): String? {
+        return when {
+            draw != null -> "bilibili.major.draw"
+            opus?.pics?.isNotEmpty() == true -> "bilibili.major.opus"
+            blocked != null -> "bilibili.major.blocked"
+            else -> null
+        }
     }
 
     private fun MajorDrawItem.toImageItem(): ImageItem? {
@@ -212,21 +248,67 @@ internal class BilibiliDynamicMapper {
         )
     }
 
-    private fun DynamicMajor.buildVideo(source: BiliDynamic): VideoAttachment? {
-        val video = video ?: ugcSeason ?: return null
-        val videoId = video.bvid.takeIfNotBlank() ?: video.aid.toString()
-        return VideoAttachment(
-            id = videoId,
-            title = video.title,
-            description = video.description,
-            cover = video.cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
-            badge = video.badge.text.takeIfNotBlank() ?: source.originType.text,
-            metrics = listOfNotNull(
-                video.stats.play.toDisplayMetric("play"),
-                video.stats.danmaku.toDisplayMetric("danmaku"),
-                source.modules.stat?.like.toDisplayMetric("like"),
+    private fun MajorBlocked.toImageItem(): ImageItem? {
+        val image = bgImg.imgDay.toCoreImageOrNull(MediaKind.IMAGE)
+            ?: bgImg.imgDark.toCoreImageOrNull(MediaKind.IMAGE)
+            ?: return null
+        return ImageItem(
+            image = image,
+            badge = hintMessage.takeIfNotBlank(),
+            alt = hintMessage.takeIfNotBlank(),
+        )
+    }
+
+    private fun DynamicMajor.buildMediaCards(source: BiliDynamic, depth: Int): List<DynamicBlock> {
+        val fallbackBadge = source.originType.text
+        return buildList {
+            video?.toMediaCardBlock(
+                source = source,
+                sourceKind = "bilibili.major.video",
+                style = if (depth > 0) MediaCardStyle.SMALL else MediaCardStyle.LARGE,
+                fallbackBadge = fallbackBadge,
+            )?.let(::add)
+            article?.toMediaCardBlock(fallbackBadge)?.let(::add)
+            music?.toMediaCardBlock(fallbackBadge)?.let(::add)
+            common?.toMediaCardBlock(fallbackBadge)?.let(::add)
+            live?.toMediaCardBlock(fallbackBadge)?.let(::add)
+            liveRcmd?.toMediaCardBlock(fallbackBadge)?.let(::add)
+            pgc?.toMediaCardBlock(fallbackBadge)?.let(::add)
+            ugcSeason?.toMediaCardBlock(
+                source = source,
+                sourceKind = "bilibili.major.ugcSeason",
+                style = MediaCardStyle.SMALL,
+                fallbackBadge = fallbackBadge,
+            )?.let(::add)
+            mediaList?.toMediaCardBlock(fallbackBadge)?.let(::add)
+        }
+    }
+
+    private fun MajorVideo.toMediaCardBlock(
+        source: BiliDynamic,
+        sourceKind: String,
+        style: MediaCardStyle,
+        fallbackBadge: String,
+    ): MediaCardBlock? {
+        val videoId = bvid.takeIfNotBlank() ?: aid.toString()
+        return MediaCardBlock(
+            style = style,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.VIDEO,
+                sourceKind = sourceKind,
+                id = videoId,
+                title = title,
+                description = description,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                durationSeconds = duration.toDurationSeconds(),
+                badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
+                metrics = listOfNotNull(
+                    stats.play.toDisplayMetric("play"),
+                    stats.danmaku.toDisplayMetric("danmaku"),
+                    source.modules.stat?.like.toDisplayMetric("like"),
+                ),
+                link = jumpUrl.toNormalizedUrlOrNull() ?: defaultLink(),
             ),
-            link = video.jumpUrl.toNormalizedUrlOrNull() ?: video.defaultLink(),
         )
     }
 
@@ -235,185 +317,223 @@ internal class BilibiliDynamicMapper {
             ?: "$BILIBILI_HOME/video/av$aid"
     }
 
-    private fun DynamicMajor.buildLargeCard(source: BiliDynamic): CardAttachment? {
-        val fallbackBadge = source.originType.text
-        val fallbackLink = dynamicLink(source.id.toString())
-        return article?.toCardAttachment(fallbackBadge)
-            ?: live?.toCardAttachment(fallbackBadge)
-            ?: liveRcmd?.toCardAttachment(fallbackBadge)
-            ?: pgc?.toCardAttachment(fallbackBadge)
-            ?: mediaList?.toCardAttachment(fallbackBadge)
-            ?: blocked?.toCardAttachment(fallbackBadge, fallbackLink)
-    }
-
-    private fun DynamicMajor.buildSmallCard(source: BiliDynamic): CardAttachment? {
-        return common?.toCardAttachment(source.originType.text)
-    }
-
-    private fun DynamicMajor.buildMiniCard(source: BiliDynamic): CardAttachment? {
-        return music?.toCardAttachment(source.originType.text)
-    }
-
-    private fun MajorArticle.toCardAttachment(fallbackBadge: String): CardAttachment? {
-        return CardAttachment(
-            id = id.toString(),
-            cardKind = "article",
-            title = title,
-            description = description.takeIfNotBlank() ?: label,
-            badge = fallbackBadge,
-            cover = covers.firstNotNullOfOrNull { it.toCoreImageOrNull(MediaKind.COVER) } ?: return null,
-            info = label.takeIfNotBlank(),
-            link = jumpUrl.toNormalizedUrlOrNull() ?: "$BILIBILI_HOME/read/cv$id",
+    private fun MajorArticle.toMediaCardBlock(fallbackBadge: String): MediaCardBlock? {
+        return MediaCardBlock(
+            style = MediaCardStyle.LARGE,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.ARTICLE,
+                sourceKind = "bilibili.major.article",
+                id = id.toString(),
+                title = title,
+                description = description.takeIfNotBlank() ?: label,
+                badge = fallbackBadge,
+                cover = covers.firstNotNullOfOrNull { it.toCoreImageOrNull(MediaKind.COVER) } ?: return null,
+                info = label.takeIfNotBlank(),
+                link = jumpUrl.toNormalizedUrlOrNull() ?: "$BILIBILI_HOME/read/cv$id",
+            ),
         )
     }
 
-    private fun MajorLive.toCardAttachment(fallbackBadge: String): CardAttachment? {
-        return CardAttachment(
-            id = roomId.toString(),
-            cardKind = "live",
-            title = title,
-            description = listOf(descFirst, descSecond).joinNonBlank(separator = "\n"),
-            badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
-            cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
-            info = status.text,
-            link = jumpUrl.toNormalizedUrlOrNull() ?: "https://live.bilibili.com/$roomId",
+    private fun MajorLive.toMediaCardBlock(fallbackBadge: String): MediaCardBlock? {
+        return MediaCardBlock(
+            style = MediaCardStyle.SMALL,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.LIVE,
+                sourceKind = "bilibili.major.live",
+                id = roomId.toString(),
+                title = title,
+                description = listOf(descFirst, descSecond).joinNonBlank(separator = "\n"),
+                badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                info = status.text,
+                link = jumpUrl.toNormalizedUrlOrNull() ?: "https://live.bilibili.com/$roomId",
+            ),
         )
     }
 
-    private fun MajorLiveRcmd.toCardAttachment(fallbackBadge: String): CardAttachment? {
+    private fun MajorLiveRcmd.toMediaCardBlock(fallbackBadge: String): MediaCardBlock? {
         val live = runCatching { liveInfo.livePlayInfo }.getOrNull() ?: return null
-        return CardAttachment(
-            id = live.roomId.toString(),
-            cardKind = "live_rcmd",
-            title = live.title,
-            description = listOf(
-                live.parentAreaName,
-                live.areaName,
-                live.watchedShow.textLarge,
-            ).joinNonBlank(separator = " / "),
-            badge = live.status.text.takeIfNotBlank() ?: fallbackBadge,
-            cover = live.cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
-            info = live.online.takeIf { it > 0 }?.toString(),
-            link = live.link.toNormalizedUrlOrNull() ?: "https://live.bilibili.com/${live.roomId}",
+        return MediaCardBlock(
+            style = MediaCardStyle.SMALL,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.LIVE,
+                sourceKind = "bilibili.major.liveRcmd",
+                id = live.roomId.toString(),
+                title = live.title,
+                description = listOf(
+                    live.parentAreaName,
+                    live.areaName,
+                    live.watchedShow.textLarge,
+                ).joinNonBlank(separator = " / "),
+                badge = live.status.text.takeIfNotBlank() ?: fallbackBadge,
+                cover = live.cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                info = live.online.takeIf { it > 0 }?.toString(),
+                link = live.link.toNormalizedUrlOrNull() ?: "https://live.bilibili.com/${live.roomId}",
+            ),
         )
     }
 
-    private fun MajorPgc.toCardAttachment(fallbackBadge: String): CardAttachment? {
+    private fun MajorPgc.toMediaCardBlock(fallbackBadge: String): MediaCardBlock? {
         val statsText = listOf(stats.play, stats.danmaku).joinNonBlank(separator = " / ")
-        return CardAttachment(
-            id = epid.takeIf { it > 0 }?.toString() ?: seasonId.toString(),
-            cardKind = "pgc:$subType",
-            title = title,
-            description = statsText,
-            badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
-            cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
-            info = statsText.takeIfNotBlank(),
-            link = jumpUrl.toNormalizedUrlOrNull() ?: "$BILIBILI_HOME/bangumi/play/ep$epid",
+        return MediaCardBlock(
+            style = MediaCardStyle.SMALL,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.COLLECTION,
+                sourceKind = "bilibili.major.pgc:$subType",
+                id = epid.takeIf { it > 0 }?.toString() ?: seasonId.toString(),
+                title = title,
+                description = statsText,
+                badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                info = statsText.takeIfNotBlank(),
+                link = jumpUrl.toNormalizedUrlOrNull() ?: "$BILIBILI_HOME/bangumi/play/ep$epid",
+            ),
         )
     }
 
-    private fun MajorMediaList.toCardAttachment(fallbackBadge: String): CardAttachment? {
-        return CardAttachment(
-            id = id.toString(),
-            cardKind = "media_list",
-            title = title,
-            description = subTitle,
-            badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
-            cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
-            link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+    private fun MajorMediaList.toMediaCardBlock(fallbackBadge: String): MediaCardBlock? {
+        return MediaCardBlock(
+            style = MediaCardStyle.SMALL,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.COLLECTION,
+                sourceKind = "bilibili.major.mediaList",
+                id = id.toString(),
+                title = title,
+                description = subTitle,
+                badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+            ),
         )
     }
 
-    private fun MajorBlocked.toCardAttachment(fallbackBadge: String, fallbackLink: String): CardAttachment? {
-        return CardAttachment(
-            id = blockedType.toString(),
-            cardKind = "blocked",
-            title = hintMessage.takeIfNotBlank() ?: fallbackBadge,
-            description = hintMessage,
-            badge = fallbackBadge,
-            cover = bgImg.imgDay.toCoreImageOrNull(MediaKind.COVER)
-                ?: bgImg.imgDark.toCoreImageOrNull(MediaKind.COVER)
-                ?: return null,
-            link = fallbackLink,
+    private fun MajorCommon.toMediaCardBlock(fallbackBadge: String): MediaCardBlock? {
+        return MediaCardBlock(
+            style = MediaCardStyle.MINI,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.LINK,
+                sourceKind = "bilibili.major.common:$bizType",
+                id = id.takeIfNotBlank() ?: sketchId,
+                title = title,
+                description = listOf(desc, label).joinNonBlank(separator = "\n"),
+                badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+            ),
         )
     }
 
-    private fun MajorCommon.toCardAttachment(fallbackBadge: String): CardAttachment? {
-        return CardAttachment(
-            id = id.takeIfNotBlank() ?: sketchId,
-            cardKind = "common:$bizType",
-            title = title,
-            description = listOf(desc, label).joinNonBlank(separator = "\n"),
-            badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
-            cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
-            link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+    private fun MajorMusic.toMediaCardBlock(fallbackBadge: String): MediaCardBlock? {
+        return MediaCardBlock(
+            style = MediaCardStyle.MINI,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.MUSIC,
+                sourceKind = "bilibili.major.music",
+                id = id.toString(),
+                title = title,
+                description = label,
+                badge = fallbackBadge,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+            ),
         )
     }
 
-    private fun MajorMusic.toCardAttachment(fallbackBadge: String): CardAttachment? {
-        return CardAttachment(
-            id = id.toString(),
-            cardKind = "music",
-            title = title,
-            description = label,
-            badge = fallbackBadge,
-            cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
-            link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+    private fun BiliDynamicAdditional.buildAdditionalBlocks(): List<DynamicBlock> {
+        return buildList {
+            buildSmallCard()?.let(::add)
+            buildPoll()?.let(::add)
+        }
+    }
+
+    private fun BiliDynamicAdditional.buildSmallCard(): MediaCardBlock? {
+        return common?.toMediaCardBlock()
+            ?: ugc?.toMediaCardBlock()
+            ?: goods?.toMediaCardBlock()
+    }
+
+    private fun AdditionalCommon.toMediaCardBlock(): MediaCardBlock? {
+        return MediaCardBlock(
+            style = MediaCardStyle.SMALL,
+            role = DynamicBlockRole.ADDITIONAL,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.LINK,
+                sourceKind = "bilibili.additional.common:$subType",
+                id = idStr,
+                title = title,
+                description = listOf(desc1, desc2).joinNonBlank(separator = "\n"),
+                badge = headText.takeIfNotBlank() ?: subType,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                link = jumpUrl.toNormalizedUrlOrNull() ?: button.jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+            ),
         )
     }
 
-    private fun BiliDynamicAdditional.buildSmallCard(): CardAttachment? {
-        return common?.toCardAttachment()
-            ?: ugc?.toCardAttachment()
-            ?: goods?.toCardAttachment()
-    }
-
-    private fun AdditionalCommon.toCardAttachment(): CardAttachment? {
-        return CardAttachment(
-            id = idStr,
-            cardKind = "additional_common:$subType",
-            title = title,
-            description = listOf(desc1, desc2).joinNonBlank(separator = "\n"),
-            badge = headText.takeIfNotBlank() ?: subType,
-            cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
-            link = jumpUrl.toNormalizedUrlOrNull() ?: button.jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+    private fun AdditionalUgc.toMediaCardBlock(): MediaCardBlock? {
+        return MediaCardBlock(
+            style = MediaCardStyle.SMALL,
+            role = DynamicBlockRole.ADDITIONAL,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.VIDEO,
+                sourceKind = "bilibili.additional.ugc",
+                id = idStr,
+                title = title,
+                description = listOf(descSecond, duration).joinNonBlank(separator = " / "),
+                badge = headText,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                durationSeconds = duration.toDurationSeconds(),
+                link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+            ),
         )
     }
 
-    private fun AdditionalUgc.toCardAttachment(): CardAttachment? {
-        return CardAttachment(
-            id = idStr,
-            cardKind = "additional_ugc",
-            title = title,
-            description = listOf(descSecond, duration).joinNonBlank(separator = " / "),
-            badge = headText,
-            cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
-            link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
-        )
-    }
-
-    private fun AdditionalGoods.toCardAttachment(): CardAttachment? {
+    private fun AdditionalGoods.toMediaCardBlock(): MediaCardBlock? {
         val item = items.firstOrNull() ?: return null
-        return CardAttachment(
-            id = item.id,
-            cardKind = "additional_goods",
-            title = item.name,
-            description = listOf(item.brief, item.price).joinNonBlank(separator = "\n"),
-            badge = headText,
-            cover = item.cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
-            link = item.jumpUrl.toNormalizedUrlOrNull() ?: jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+        return MediaCardBlock(
+            style = MediaCardStyle.SMALL,
+            role = DynamicBlockRole.ADDITIONAL,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.PRODUCT,
+                sourceKind = "bilibili.additional.goods",
+                id = item.id,
+                title = item.name,
+                description = listOf(item.brief, item.price).joinNonBlank(separator = "\n"),
+                badge = headText,
+                cover = item.cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                link = item.jumpUrl.toNormalizedUrlOrNull() ?: jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+            ),
         )
     }
 
-    private fun BiliDynamicAdditional.buildPoll(): PollAttachment? {
+    private fun BiliDynamicAdditional.buildPoll(): PollBlock? {
         val voteId = vote?.voteId
             ?.takeIf { it > 0 }
             ?.toString()
             ?: return null
-        return PollAttachment(
+        return PollBlock(
             id = voteId,
-            title = "Vote",
+            title = "投票",
+            sourceKind = "bilibili.additional.vote",
+            role = DynamicBlockRole.ADDITIONAL,
         )
+    }
+
+    private fun buildRepost(
+        source: BiliDynamic,
+        fallbackPublisher: Publisher,
+        depth: Int,
+    ): RepostBlock? {
+        if (depth >= MAX_ORIGIN_DEPTH) return null
+        return source.origin
+            ?.let { map(it, fallbackPublisher, depth + 1) }
+            ?.let { update ->
+                RepostBlock(
+                    referenceKind = DynamicReferenceKind.ORIGIN,
+                    key = update.key,
+                    link = update.link,
+                    embedded = update,
+                )
+            }
     }
 
     private fun buildMetrics(stats: ModuleStats?): List<DynamicMetric> {
@@ -422,27 +542,6 @@ internal class BilibiliDynamicMapper {
             stats?.comment.toDisplayMetric("comment"),
             stats?.forward.toDisplayMetric("forward"),
         )
-    }
-
-    private fun buildReferences(
-        source: BiliDynamic,
-        fallbackPublisher: Publisher,
-        depth: Int,
-    ): List<SourceUpdateReference> {
-        if (depth >= MAX_ORIGIN_DEPTH) return emptyList()
-        return source.origin
-            ?.let { map(it, fallbackPublisher, depth + 1) }
-            ?.let { update ->
-                listOf(
-                    SourceUpdateReference(
-                        kind = DynamicReferenceKind.ORIGIN,
-                        key = update.key,
-                        link = update.link,
-                        embedded = update,
-                    )
-                )
-            }
-            .orEmpty()
     }
 
     private fun ModuleStats.Stats?.toDisplayText(): String {
@@ -477,6 +576,14 @@ internal class BilibiliDynamicMapper {
         return url.toNormalizedUrlOrNull()?.let { MediaRef(uri = it, kind = kind) }
     }
 
+    private fun String?.toDurationSeconds(): Long? {
+        val parts = this?.split(':')
+            ?.mapNotNull { it.trim().toLongOrNull() }
+            ?.takeIf { it.isNotEmpty() }
+            ?: return null
+        return parts.fold(0L) { total, next -> total * 60 + next }
+    }
+
     private fun String?.toNormalizedUrlOrNull(): String? {
         val value = this?.trim()?.takeIf { it.isNotBlank() } ?: return null
         return when {
@@ -489,6 +596,11 @@ internal class BilibiliDynamicMapper {
 
     private fun String?.takeIfNotBlank(): String? {
         return this?.takeIf { it.isNotBlank() }
+    }
+
+    private fun String.ensureTopicText(): String {
+        val value = trim()
+        return if (value.startsWith("#") && value.endsWith("#")) value else "#$value#"
     }
 
     private fun String?.toLabel(kind: DynamicLabelKind, sourceKey: String): DynamicLabel? {
