@@ -33,6 +33,8 @@ import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import top.colter.dynamic.core.data.LiveStatus
+import top.colter.dynamic.core.data.MediaKind
+import top.colter.dynamic.core.data.MediaRef
 import kotlinx.coroutines.CancellationException
 import top.colter.bilibili.api.relation
 import top.colter.bilibili.api.unfollow
@@ -315,6 +317,7 @@ internal class BilibiliPollService(
                 account = PublisherLoginAccount(
                     userId = nav.mid.takeIf { it > 0 }?.toString(),
                     name = nav.name.takeIf { it.isNotBlank() },
+                    avatar = nav.face.url.takeIf { it.isNotBlank() }?.let { MediaRef(it, MediaKind.AVATAR) },
                 ),
             )
         } catch (e: CancellationException) {

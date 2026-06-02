@@ -306,6 +306,15 @@ public class BilibiliPublisherPlugin() :
         return pollService.checkLoginState()
     }
 
+    override suspend fun exportCookie(): String? {
+        val cookiesJson = if (::pollService.isInitialized) {
+            pollService.exportCookiesJson()
+        } else {
+            currentConfig().cookiesJson
+        }
+        return compactJson(cookiesJson).takeIf { it.isNotBlank() && it != "[]" }
+    }
+
     override suspend fun onSubscriptionChanged(event: SubscriptionChangedEvent) {
         if (event.publisher.platformId != platformId) return
 
