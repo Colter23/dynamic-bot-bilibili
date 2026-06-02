@@ -191,7 +191,7 @@ class BilibiliDynamicMapperTest {
         val smallCard = mapped.blocks
             .filterIsInstance<MediaCardBlock>()
             .single { it.card.sourceKind == "bilibili.additional.ugc" }
-        assertEquals(MediaCardStyle.SMALL, smallCard.style)
+        assertEquals(MediaCardStyle.MINI, smallCard.style)
         assertEquals("related", smallCard.card.id)
         val topic = assertIs<TextBlock>(mapped.blocks.first()).content.nodes.first()
         assertEquals("#topic#", topic.text)

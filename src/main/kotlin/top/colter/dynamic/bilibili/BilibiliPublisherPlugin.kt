@@ -142,6 +142,7 @@ public class BilibiliPublisherPlugin() :
         PublisherLoginMethod.COOKIE,
         PublisherLoginMethod.QR_CODE,
     )
+    override val supportsCookieExport: Boolean = true
 
     override suspend fun onLoad(context: PluginContext) {
         pluginId = context.pluginId

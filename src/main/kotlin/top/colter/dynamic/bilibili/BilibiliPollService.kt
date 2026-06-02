@@ -429,6 +429,9 @@ internal class BilibiliPollService(
             qrContent = url,
             expiresAtEpochSeconds = System.currentTimeMillis() / 1000 + QR_EXPIRES_SECONDS,
             message = "请使用 Bilibili App 扫码并确认登录",
+            instruction = "请使用 Bilibili App 扫码并确认登录",
+            validityHint = "三分钟内有效",
+            statusPollIntervalMillis = 2_500,
         )
     }
 
