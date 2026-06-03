@@ -1455,6 +1455,10 @@ class BilibiliPublisherPluginTest {
         fun put(publisherId: Int, cursor: SourceCursor) {
             states[publisherId] = cursor
         }
+
+        override fun evict(publisherId: Int) {
+            states.remove(publisherId)
+        }
     }
 
     private class InMemoryLiveStatusStore(
@@ -1469,6 +1473,10 @@ class BilibiliPublisherPluginTest {
         override fun save(state: PublisherLiveStatus): PublisherLiveStatus {
             states[state.publisherId] = state
             return state
+        }
+
+        override fun evict(publisherId: Int) {
+            states.remove(publisherId)
         }
     }
 

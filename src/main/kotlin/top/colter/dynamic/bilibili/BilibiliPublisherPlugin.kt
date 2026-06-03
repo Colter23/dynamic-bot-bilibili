@@ -976,6 +976,8 @@ public class BilibiliPublisherPlugin() :
         val snapshot = subscriptionQueryService.findActivePublisherWithSubscribersById(publisherId)
         if (snapshot == null || snapshot.publisher.platformId != platformId) {
             removePublisherFromSnapshots(publisherId)
+            cursorStore.evict(publisherId)
+            liveStatusStore.evict(publisherId)
         } else {
             applyPublisherSnapshot(snapshot)
         }
@@ -985,7 +987,7 @@ public class BilibiliPublisherPlugin() :
         val publisherId = snapshot.publisher.id
         val hasDynamic = snapshot.hasEnabledEvent(SubscriptionEventKind.DYNAMIC)
         val hasLive = snapshot.hasLiveEventSubscription()
-        return synchronized(publisherLock) {
+        val interests = synchronized(publisherLock) {
             val wasDynamicPresent = dynamicPublishers.containsKey(publisherId)
             val wasLivePresent = livePublishers.containsKey(publisherId)
             dynamicPublishers = if (hasDynamic) {
@@ -1005,6 +1007,9 @@ public class BilibiliPublisherPlugin() :
                 becameLivePresent = hasLive && !wasLivePresent,
             )
         }
+        if (!interests.hasDynamic) cursorStore.evict(publisherId)
+        if (!interests.hasLive) liveStatusStore.evict(publisherId)
+        return interests
     }
 
     private fun removePublisherFromSnapshots(publisherId: Int) {

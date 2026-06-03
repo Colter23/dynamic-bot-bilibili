@@ -15,6 +15,8 @@ internal interface BilibiliCursorStore {
     fun ensureBaseline(publisherId: Int, timestamp: Long): SourceCursor
 
     fun markSeen(publisherId: Int, dynamicId: String, timestamp: Long): SourceCursor
+
+    fun evict(publisherId: Int)
 }
 
 internal class SourceStateBilibiliCursorStore(
@@ -51,12 +53,18 @@ internal class SourceStateBilibiliCursorStore(
         cache[publisherId] = updated
         return updated
     }
+
+    override fun evict(publisherId: Int) {
+        cache.remove(publisherId)
+    }
 }
 
 internal interface BilibiliLiveStatusStore {
     fun get(publisherId: Int): PublisherLiveStatus?
 
     fun save(state: PublisherLiveStatus): PublisherLiveStatus
+
+    fun evict(publisherId: Int)
 }
 
 internal class SourceStateBilibiliLiveStatusStore(
@@ -75,5 +83,9 @@ internal class SourceStateBilibiliLiveStatusStore(
         val updated = sourceStateStore.saveLiveStatus(state)
         cache[state.publisherId] = updated
         return updated
+    }
+
+    override fun evict(publisherId: Int) {
+        cache.remove(publisherId)
     }
 }
