@@ -3,6 +3,7 @@ package top.colter.dynamic.bilibili
 import top.colter.dynamic.core.config.ConfigFieldSpec
 import top.colter.dynamic.core.config.ConfigFieldType
 import top.colter.dynamic.core.config.ConfigFormSpec
+import top.colter.dynamic.core.config.ConfigNumberKind
 
 public data class BilibiliPublisherConfig(
     val pollingIntervalSeconds: Double = 15.0,
@@ -47,6 +48,7 @@ public object BilibiliPublisherConfigForm {
                 section = "补发",
                 description = "插件启动或重新登录后补发该时间窗口内游标遗漏的动态；0 表示不补发历史动态。",
                 min = 0,
+                numberKind = ConfigNumberKind.INTEGER,
             ),
             ConfigFieldSpec(
                 path = "followGroupName",
@@ -87,6 +89,7 @@ public object BilibiliPublisherConfigForm {
                 section = "直播",
                 description = "单次直播状态接口最多查询的 UP 主数量，过大可能增加接口失败概率。",
                 min = 1,
+                numberKind = ConfigNumberKind.INTEGER,
             ),
         ),
     )
