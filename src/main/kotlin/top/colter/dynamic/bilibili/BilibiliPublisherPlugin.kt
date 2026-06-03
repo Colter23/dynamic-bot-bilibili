@@ -786,6 +786,7 @@ public class BilibiliPublisherPlugin() :
                 dynamics.sortedWith(compareBy<BiliDynamic> { it.time }.thenBy { it.id })
             }
 
+        var replayedCount = 0
         targets.forEach { target ->
             var cursor = target.cursor
             dynamicsByPublisher[target.userId].orEmpty().forEach dynamicLoop@{ raw ->
@@ -794,18 +795,24 @@ public class BilibiliPublisherPlugin() :
                 if (raw.time <= cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) return@dynamicLoop
 
                 val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
-                logger.info {
+                logger.debug {
                     "Bilibili 补发历史动态：publisher=${target.publisher.displayLabel()}，uid=${target.userId}，dynamicId=$dynamicId，time=${raw.time}"
                 }
                 if (publishSourceUpdate(dynamic)) {
                     cursor = cursorStore.markSeen(target.publisher.id, dynamicId, raw.time)
+                    replayedCount += 1
                 }
+            }
+        }
+        if (replayedCount > 0) {
+            logger.info {
+                "Bilibili 历史动态补发完成：发布者=${targets.size}，动态=$replayedCount"
             }
         }
     }
 
     private suspend fun publishSourceUpdate(update: SourceUpdate): Boolean {
-        logger.info {
+        logger.debug {
             "Bilibili 提交来源更新到主项目：event=${update.eventType.value}，update=${update.key.stableValue()}，publisher=${update.publisher.displayLabel()}"
         }
         val result = sourceUpdatePublisher.publish(
@@ -815,7 +822,7 @@ public class BilibiliPublisherPlugin() :
             ),
         )
         if (result.accepted) {
-            logger.info {
+            logger.debug {
                 "Bilibili 来源更新已进入主项目：update=${update.key.stableValue()}，结果=${result.message}"
             }
         } else {
