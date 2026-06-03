@@ -8,17 +8,27 @@ import kotlin.test.assertNull
 import top.colter.bilibili.data.LazyImage as BiliLazyImage
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.BiliDynamicModules
+import top.colter.bilibili.data.dynamic.additional.AdditionalCommon
+import top.colter.bilibili.data.dynamic.additional.AdditionalGoodItem
+import top.colter.bilibili.data.dynamic.additional.AdditionalGoods
+import top.colter.bilibili.data.dynamic.additional.AdditionalLottery
+import top.colter.bilibili.data.dynamic.additional.AdditionalReserve
 import top.colter.bilibili.data.dynamic.additional.AdditionalUgc
+import top.colter.bilibili.data.dynamic.additional.AdditionalVote
 import top.colter.bilibili.data.dynamic.content.DynamicAdditional as BiliDynamicAdditional
 import top.colter.bilibili.data.dynamic.content.DynamicDesc
 import top.colter.bilibili.data.dynamic.content.DynamicMajor
 import top.colter.bilibili.data.dynamic.content.DynamicTopic
 import top.colter.bilibili.data.dynamic.content.RichTextNode
 import top.colter.bilibili.data.dynamic.general.Badge
+import top.colter.bilibili.data.dynamic.general.Button
+import top.colter.bilibili.data.dynamic.general.Desc
 import top.colter.bilibili.data.dynamic.general.Stats as BiliMediaStats
 import top.colter.bilibili.data.dynamic.major.MajorArticle
 import top.colter.bilibili.data.dynamic.major.MajorDraw
 import top.colter.bilibili.data.dynamic.major.MajorDrawItem
+import top.colter.bilibili.data.dynamic.major.MajorOpus
+import top.colter.bilibili.data.dynamic.major.MajorOpusPic
 import top.colter.bilibili.data.dynamic.major.MajorVideo
 import top.colter.bilibili.data.dynamic.module.ModuleAuthor
 import top.colter.bilibili.data.dynamic.module.ModuleDynamic
@@ -32,10 +42,13 @@ import top.colter.bilibili.data.user.OfficialVerifyType
 import top.colter.dynamic.core.data.DynamicContentNodeEmoji
 import top.colter.dynamic.core.data.DynamicContentNodeTag
 import top.colter.dynamic.core.data.DynamicPayload
+import top.colter.dynamic.core.data.DynamicBlockRole
 import top.colter.dynamic.core.data.DynamicReferenceKind
 import top.colter.dynamic.core.data.ImageGridBlock
 import top.colter.dynamic.core.data.MediaCardBlock
 import top.colter.dynamic.core.data.MediaCardStyle
+import top.colter.dynamic.core.data.PollBlock
+import top.colter.dynamic.core.data.PollStatus
 import top.colter.dynamic.core.data.Publisher
 import top.colter.dynamic.core.data.PublisherKey
 import top.colter.dynamic.core.data.RepostBlock
@@ -43,6 +56,7 @@ import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.data.TextBlock
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
+import kotlin.test.assertTrue
 
 class BilibiliDynamicMapperTest {
     private val mapper = BilibiliDynamicMapper()
@@ -206,6 +220,203 @@ class BilibiliDynamicMapperTest {
     }
 
     @Test
+    fun `map should convert opus summary pictures and link`() {
+        val source = dynamic(
+            id = "250",
+            type = OriginDynamicType.DRAW,
+            dynamic = ModuleDynamic(
+                major = DynamicMajor(
+                    type = MajorType.OPUS,
+                    opus = MajorOpus(
+                        title = "opus title",
+                        jumpUrl = "//www.bilibili.com/opus/250",
+                        summary = DynamicDesc(
+                            richTextNodes = listOf(
+                                RichTextNode(
+                                    type = RichTextType.TEXT,
+                                    origText = "opus summary",
+                                    text = "opus summary",
+                                ),
+                            ),
+                            text = "opus summary",
+                        ),
+                        pics = listOf(
+                            MajorOpusPic(
+                                width = 640,
+                                height = 360,
+                                size = 23.0,
+                                url = BiliLazyImage("https://example.com/opus.png"),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val mapped = assertIs<DynamicPayload>(assertNotNull(mapper.map(source, fallbackPublisher())).payload)
+        val textBlock = mapped.blocks.filterIsInstance<TextBlock>().single()
+        val imageBlock = mapped.blocks.filterIsInstance<ImageGridBlock>().single()
+
+        assertEquals("opus title", mapped.title)
+        assertEquals("opus summary", textBlock.content.plainText)
+        assertEquals("https://www.bilibili.com/opus/250", textBlock.link)
+        assertEquals("bilibili.major.opus.summary", textBlock.sourceKind)
+        assertEquals("bilibili.major.opus", imageBlock.sourceKind)
+        assertEquals("https://www.bilibili.com/opus/250", imageBlock.link)
+        assertEquals("https://example.com/opus.png", imageBlock.images.single().image.uri)
+    }
+
+    @Test
+    fun `map should convert all supported additional blocks`() {
+        val cards = listOf(
+            additionalPayload(
+                BiliDynamicAdditional(
+                    type = AdditionalType.COMMON,
+                    common = AdditionalCommon(
+                        idStr = "activity",
+                        title = "activity title",
+                        cover = BiliLazyImage(""),
+                        subType = "official_activity",
+                        desc1 = "activity desc",
+                        desc2 = "activity time",
+                        headText = "活动",
+                        jumpUrl = "//www.bilibili.com/activity",
+                        style = 1,
+                        button = button(),
+                    ),
+                )
+            ).blocks.filterIsInstance<MediaCardBlock>().single(),
+            additionalPayload(
+                BiliDynamicAdditional(
+                    type = AdditionalType.RESERVE,
+                    reserve = AdditionalReserve(
+                        rid = 9001,
+                        upMid = 42,
+                        title = "reserve title",
+                        reserveTotal = 1234,
+                        desc1 = Desc(text = "直播预约", style = 0),
+                        desc2 = Desc(text = "今晚八点", style = 0),
+                        desc3 = Desc(text = "已预约", style = 0),
+                        state = 1,
+                        stype = 2,
+                        jumpUrl = "//live.bilibili.com/9001",
+                        button = button(),
+                    ),
+                )
+            ).blocks.filterIsInstance<MediaCardBlock>().single(),
+            additionalPayload(
+                BiliDynamicAdditional(
+                    type = AdditionalType.UGC,
+                    ugc = AdditionalUgc(
+                        idStr = "ugc",
+                        title = "ugc title",
+                        cover = BiliLazyImage(""),
+                        descSecond = "ugc desc",
+                        duration = "03:21",
+                        headText = "相关视频",
+                        jumpUrl = "//www.bilibili.com/video/BV1",
+                        multiLine = false,
+                    ),
+                )
+            ).blocks.filterIsInstance<MediaCardBlock>().single(),
+            additionalPayload(
+                BiliDynamicAdditional(
+                    type = AdditionalType.GOODS,
+                    goods = AdditionalGoods(
+                        headIcon = "",
+                        headText = "商品",
+                        jumpUrl = "//mall.bilibili.com",
+                        items = listOf(
+                            AdditionalGoodItem(
+                                id = "goods",
+                                name = "goods title",
+                                brief = "goods brief",
+                                cover = BiliLazyImage(""),
+                                price = "12",
+                                jumpDesc = "去看看",
+                                jumpUrl = "//mall.bilibili.com/goods",
+                            ),
+                        ),
+                    ),
+                )
+            ).blocks.filterIsInstance<MediaCardBlock>().single(),
+            additionalPayload(
+                BiliDynamicAdditional(
+                    type = AdditionalType.LOTTERY,
+                    lottery = AdditionalLottery(
+                        rid = 7001,
+                        title = "lottery title",
+                        mid = 42,
+                        state = 1,
+                        desc = Desc(text = "lottery desc", style = 0),
+                        button = button(),
+                        jumpUrl = "//www.bilibili.com/lottery",
+                    ),
+                )
+            ).blocks.filterIsInstance<MediaCardBlock>().single(),
+        )
+        val poll = additionalPayload(
+            BiliDynamicAdditional(
+                type = AdditionalType.VOTE,
+                vote = AdditionalVote(
+                    uid = 42,
+                    voteId = 6001,
+                    desc = "vote title",
+                    type = 1,
+                    status = 1,
+                    joinNum = 12,
+                    endTime = 0,
+                    choiceCnt = 1,
+                    defaultShare = 0,
+                ),
+            )
+        ).blocks.filterIsInstance<PollBlock>().single()
+
+        assertEquals(
+            listOf(
+                "bilibili.additional.common:official_activity",
+                "bilibili.additional.reserve:2",
+                "bilibili.additional.ugc",
+                "bilibili.additional.goods",
+                "bilibili.additional.lottery",
+            ),
+            cards.map { it.card.sourceKind },
+        )
+        assertTrue(cards.all { it.style == MediaCardStyle.MINI })
+        assertTrue(cards.all { it.role == DynamicBlockRole.ADDITIONAL })
+        assertEquals("vote title", poll.title)
+        assertEquals(PollStatus.OPEN, poll.status)
+        assertEquals(DynamicBlockRole.ADDITIONAL, poll.role)
+    }
+
+    @Test
+    fun `map should keep major card when cover is absent`() {
+        val source = dynamic(
+            id = "251",
+            type = OriginDynamicType.ARTICLE,
+            dynamic = ModuleDynamic(
+                major = DynamicMajor(
+                    type = MajorType.ARTICLE,
+                    article = MajorArticle(
+                        id = 251,
+                        title = "article without cover",
+                        description = "article body",
+                        label = "100 reads",
+                        jumpUrl = "//www.bilibili.com/read/cv251",
+                        covers = listOf(BiliLazyImage("")),
+                    ),
+                ),
+            ),
+        )
+
+        val mapped = assertIs<DynamicPayload>(assertNotNull(mapper.map(source, fallbackPublisher())).payload)
+        val card = mapped.blocks.filterIsInstance<MediaCardBlock>().single()
+
+        assertEquals("bilibili.major.article", card.card.sourceKind)
+        assertNull(card.card.cover)
+    }
+
+    @Test
     fun `map should make video small inside forwarded origin`() {
         val origin = dynamic(
             id = "101",
@@ -323,6 +534,28 @@ class BilibiliDynamicMapperTest {
                 stat = stats,
             ),
             origin = origin,
+        )
+    }
+
+    private fun additionalPayload(additional: BiliDynamicAdditional): DynamicPayload {
+        return assertIs<DynamicPayload>(
+            assertNotNull(
+                mapper.map(
+                    dynamic(
+                        id = additional.type.name.hashCode().toUInt().toString(),
+                        type = OriginDynamicType.WORD,
+                        dynamic = ModuleDynamic(additional = additional),
+                    ),
+                    fallbackPublisher(),
+                )
+            ).payload
+        )
+    }
+
+    private fun button(): Button {
+        return Button(
+            type = 1,
+            jumpUrl = "//www.bilibili.com/button",
         )
     }
 

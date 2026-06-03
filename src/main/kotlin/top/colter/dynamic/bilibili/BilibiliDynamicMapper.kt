@@ -4,11 +4,15 @@ import top.colter.bilibili.data.LazyImage as BiliLazyImage
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.additional.AdditionalCommon
 import top.colter.bilibili.data.dynamic.additional.AdditionalGoods
+import top.colter.bilibili.data.dynamic.additional.AdditionalLottery
+import top.colter.bilibili.data.dynamic.additional.AdditionalReserve
 import top.colter.bilibili.data.dynamic.additional.AdditionalUgc
 import top.colter.bilibili.data.dynamic.content.DynamicAdditional as BiliDynamicAdditional
 import top.colter.bilibili.data.dynamic.content.DynamicDesc
 import top.colter.bilibili.data.dynamic.content.DynamicMajor
 import top.colter.bilibili.data.dynamic.content.RichTextNode
+import top.colter.bilibili.data.dynamic.general.Button
+import top.colter.bilibili.data.dynamic.general.Desc
 import top.colter.bilibili.data.dynamic.major.MajorArticle
 import top.colter.bilibili.data.dynamic.major.MajorBlocked
 import top.colter.bilibili.data.dynamic.major.MajorCommon
@@ -49,6 +53,7 @@ import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.PlatformCapability
 import top.colter.dynamic.core.data.PlatformDescriptor
 import top.colter.dynamic.core.data.PollBlock
+import top.colter.dynamic.core.data.PollStatus
 import top.colter.dynamic.core.data.Publisher
 import top.colter.dynamic.core.data.PublisherInfo
 import top.colter.dynamic.core.data.PublisherKey
@@ -122,10 +127,18 @@ internal class BilibiliDynamicMapper {
     private fun buildBlocks(source: BiliDynamic, fallbackPublisher: Publisher, depth: Int): List<DynamicBlock> {
         val major = source.modules.dynamic.major
         return buildList {
-            buildContent(source)?.let { add(TextBlock(it)) }
+            buildContent(source)?.let {
+                add(
+                    TextBlock(
+                        content = it,
+                        link = major?.opusLink(),
+                        sourceKind = major?.opus?.let { "bilibili.major.opus.summary" },
+                    )
+                )
+            }
             major?.buildPics()
                 ?.takeIf { it.isNotEmpty() }
-                ?.let { add(ImageGridBlock(images = it, sourceKind = major.imageSourceKind())) }
+                ?.let { add(ImageGridBlock(images = it, link = major.opusLink(), sourceKind = major.imageSourceKind())) }
             major?.buildMediaCards(source, depth)?.let(::addAll)
             buildRepost(source, fallbackPublisher, depth)?.let(::add)
             source.modules.dynamic.additional?.buildAdditionalBlocks()?.let(::addAll)
@@ -229,6 +242,10 @@ internal class BilibiliDynamicMapper {
         }
     }
 
+    private fun DynamicMajor.opusLink(): String? {
+        return opus?.jumpUrl.toNormalizedUrlOrNull()
+    }
+
     private fun MajorDrawItem.toImageItem(): ImageItem? {
         return ImageItem(
             image = src.toCoreImageOrNull(MediaKind.IMAGE) ?: return null,
@@ -299,7 +316,7 @@ internal class BilibiliDynamicMapper {
                 id = videoId,
                 title = title,
                 description = description,
-                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER),
                 durationSeconds = duration.toDurationSeconds(),
                 badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
                 metrics = listOfNotNull(
@@ -327,7 +344,7 @@ internal class BilibiliDynamicMapper {
                 title = title,
                 description = description.takeIfNotBlank() ?: label,
                 badge = fallbackBadge,
-                cover = covers.firstNotNullOfOrNull { it.toCoreImageOrNull(MediaKind.COVER) } ?: return null,
+                cover = covers.firstNotNullOfOrNull { it.toCoreImageOrNull(MediaKind.COVER) },
                 info = label.takeIfNotBlank(),
                 link = jumpUrl.toNormalizedUrlOrNull() ?: "$BILIBILI_HOME/read/cv$id",
             ),
@@ -344,7 +361,7 @@ internal class BilibiliDynamicMapper {
                 title = title,
                 description = listOf(descFirst, descSecond).joinNonBlank(separator = "\n"),
                 badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
-                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER),
                 info = status.text,
                 link = jumpUrl.toNormalizedUrlOrNull() ?: "https://live.bilibili.com/$roomId",
             ),
@@ -366,7 +383,7 @@ internal class BilibiliDynamicMapper {
                     live.watchedShow.textLarge,
                 ).joinNonBlank(separator = " / "),
                 badge = live.status.text.takeIfNotBlank() ?: fallbackBadge,
-                cover = live.cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                cover = live.cover.toCoreImageOrNull(MediaKind.COVER),
                 info = live.online.takeIf { it > 0 }?.toString(),
                 link = live.link.toNormalizedUrlOrNull() ?: "https://live.bilibili.com/${live.roomId}",
             ),
@@ -384,7 +401,7 @@ internal class BilibiliDynamicMapper {
                 title = title,
                 description = statsText,
                 badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
-                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER),
                 info = statsText.takeIfNotBlank(),
                 link = jumpUrl.toNormalizedUrlOrNull() ?: "$BILIBILI_HOME/bangumi/play/ep$epid",
             ),
@@ -401,7 +418,7 @@ internal class BilibiliDynamicMapper {
                 title = title,
                 description = subTitle,
                 badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
-                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER),
                 link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
             ),
         )
@@ -417,7 +434,7 @@ internal class BilibiliDynamicMapper {
                 title = title,
                 description = listOf(desc, label).joinNonBlank(separator = "\n"),
                 badge = badge.text.takeIfNotBlank() ?: fallbackBadge,
-                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER),
                 link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
             ),
         )
@@ -433,7 +450,7 @@ internal class BilibiliDynamicMapper {
                 title = title,
                 description = label,
                 badge = fallbackBadge,
-                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER),
                 coverRatio = 1f,
                 link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
             ),
@@ -449,8 +466,10 @@ internal class BilibiliDynamicMapper {
 
     private fun BiliDynamicAdditional.buildSmallCard(): MediaCardBlock? {
         return common?.toMediaCardBlock()
+            ?: reserve?.toMediaCardBlock()
             ?: ugc?.toMediaCardBlock()
             ?: goods?.toMediaCardBlock()
+            ?: lottery?.toMediaCardBlock()
     }
 
     private fun AdditionalCommon.toMediaCardBlock(): MediaCardBlock? {
@@ -464,8 +483,30 @@ internal class BilibiliDynamicMapper {
                 title = title,
                 description = listOf(desc1, desc2).joinNonBlank(separator = "\n"),
                 badge = headText.takeIfNotBlank() ?: subType,
-                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER),
                 coverRatio = 1f,
+                link = jumpUrl.toNormalizedUrlOrNull() ?: button.jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+            ),
+        )
+    }
+
+    private fun AdditionalReserve.toMediaCardBlock(): MediaCardBlock? {
+        return MediaCardBlock(
+            style = MediaCardStyle.MINI,
+            role = DynamicBlockRole.ADDITIONAL,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.LINK,
+                sourceKind = "bilibili.additional.reserve:$stype",
+                id = rid.toString(),
+                title = title,
+                description = listOf(
+                    desc1.displayText(),
+                    desc2.displayText(),
+                    desc3?.displayText(),
+                    reserveTotal.takeIf { it > 0 }?.let { "${it}人预约" },
+                ).joinNonBlank(separator = "\n"),
+                badge = button.displayText() ?: "预约",
+                info = desc3?.displayText(),
                 link = jumpUrl.toNormalizedUrlOrNull() ?: button.jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
             ),
         )
@@ -482,7 +523,7 @@ internal class BilibiliDynamicMapper {
                 title = title,
                 description = listOf(descSecond, duration).joinNonBlank(separator = " / "),
                 badge = headText,
-                cover = cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                cover = cover.toCoreImageOrNull(MediaKind.COVER),
                 durationSeconds = duration.toDurationSeconds(),
                 link = jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
             ),
@@ -501,21 +542,43 @@ internal class BilibiliDynamicMapper {
                 title = item.name,
                 description = listOf(item.brief, item.price).joinNonBlank(separator = "\n"),
                 badge = headText,
-                cover = item.cover.toCoreImageOrNull(MediaKind.COVER) ?: return null,
+                cover = item.cover.toCoreImageOrNull(MediaKind.COVER),
                 coverRatio = 1f,
                 link = item.jumpUrl.toNormalizedUrlOrNull() ?: jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
             ),
         )
     }
 
+    private fun AdditionalLottery.toMediaCardBlock(): MediaCardBlock? {
+        return MediaCardBlock(
+            style = MediaCardStyle.MINI,
+            role = DynamicBlockRole.ADDITIONAL,
+            card = DynamicMediaCard(
+                kind = DynamicMediaCardKind.LINK,
+                sourceKind = "bilibili.additional.lottery",
+                id = rid.toString(),
+                title = title,
+                description = desc.displayText().orEmpty(),
+                badge = button.displayText() ?: "充电抽奖",
+                link = jumpUrl.toNormalizedUrlOrNull() ?: button.jumpUrl.toNormalizedUrlOrNull() ?: BILIBILI_HOME,
+            ),
+        )
+    }
+
     private fun BiliDynamicAdditional.buildPoll(): PollBlock? {
-        val voteId = vote?.voteId
-            ?.takeIf { it > 0 }
+        val vote = vote ?: return null
+        val voteId = vote.voteId
+            .takeIf { it > 0 }
             ?.toString()
             ?: return null
         return PollBlock(
             id = voteId,
-            title = "投票",
+            title = vote.desc.takeIfNotBlank() ?: "投票",
+            status = when (vote.status) {
+                1 -> PollStatus.OPEN
+                4 -> PollStatus.CLOSED
+                else -> PollStatus.UNKNOWN
+            },
             sourceKind = "bilibili.additional.vote",
             role = DynamicBlockRole.ADDITIONAL,
         )
@@ -585,6 +648,16 @@ internal class BilibiliDynamicMapper {
             ?.takeIf { it.isNotEmpty() }
             ?: return null
         return parts.fold(0L) { total, next -> total * 60 + next }
+    }
+
+    private fun Desc.displayText(): String? {
+        return text.takeIfNotBlank()
+    }
+
+    private fun Button.displayText(): String? {
+        return jumpStyle?.text.takeIfNotBlank()
+            ?: check?.text.takeIfNotBlank()
+            ?: uncheck?.text.takeIfNotBlank()
     }
 
     private fun String?.toNormalizedUrlOrNull(): String? {
