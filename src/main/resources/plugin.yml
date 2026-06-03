@@ -1,6 +1,6 @@
 id: bilibili-publisher
 name: Bilibili 动态源插件
-version: 0.0.2
+version: 0.0.1
 mainClass: top.colter.dynamic.bilibili.BilibiliPublisherPlugin
 apiVersion: 4.0.0
 description: Bilibili 动态轮询、登录与订阅分发。
