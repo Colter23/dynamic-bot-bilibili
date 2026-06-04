@@ -7,10 +7,12 @@ import kotlinx.coroutines.withTimeoutOrNull
 import top.colter.bilibili.api.follow
 import top.colter.bilibili.api.getCurrentUserNav
 import top.colter.bilibili.api.getDynamicDetail
+import top.colter.bilibili.api.getLiveInfo
 import top.colter.bilibili.api.getLiveStatusBatch
 import top.colter.bilibili.api.getNewDynamic
 import top.colter.bilibili.api.getGroupList
 import top.colter.bilibili.api.getUserInfo
+import top.colter.bilibili.api.getVideoDetail
 import top.colter.bilibili.api.modifyGroupUsers
 import top.colter.bilibili.api.createGroup
 import top.colter.bilibili.auth.qrCode
@@ -23,6 +25,7 @@ import top.colter.bilibili.data.login.QrCodeLoginData
 import top.colter.bilibili.data.login.QrCodeLoginResult
 import top.colter.bilibili.data.login.QrCodeLoginStatus
 import top.colter.bilibili.data.user.BiliGroup
+import top.colter.bilibili.data.video.BiliVideo
 import top.colter.bilibili.exception.BiliLoginException
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
@@ -50,6 +53,22 @@ internal data class BilibiliPublisherSnapshot(
     val pendantUrl: String? = null,
 )
 
+internal data class BilibiliVideoSnapshot(
+    val aid: Long,
+    val bvid: String,
+    val title: String,
+    val description: String,
+    val coverUrl: String? = null,
+    val ownerId: String,
+    val ownerName: String,
+    val ownerFaceUrl: String? = null,
+    val durationSeconds: Long? = null,
+    val publishedAtEpochSeconds: Long? = null,
+    val play: Long? = null,
+    val danmaku: Long? = null,
+    val like: Long? = null,
+)
+
 internal data class BilibiliLiveSnapshot(
     val userId: String,
     val roomId: String,
@@ -58,6 +77,18 @@ internal data class BilibiliLiveSnapshot(
     val area: String? = null,
     val coverUrl: String? = null,
     val startedAtEpochSeconds: Long? = null,
+)
+
+internal data class BilibiliLiveRoomSnapshot(
+    val userId: String,
+    val roomId: String,
+    val status: LiveStatus,
+    val title: String,
+    val area: String? = null,
+    val coverUrl: String? = null,
+    val startedAtEpochSeconds: Long? = null,
+    val online: Long? = null,
+    val attention: Long? = null,
 )
 
 internal data class BilibiliFollowRelationSnapshot(
@@ -80,6 +111,14 @@ internal interface BilibiliPlatformGateway {
     }
 
     suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot?
+
+    suspend fun fetchVideoSnapshot(videoId: String): BilibiliVideoSnapshot? {
+        throw UnsupportedOperationException("不支持获取视频详情")
+    }
+
+    suspend fun fetchLiveRoomSnapshot(roomId: String): BilibiliLiveRoomSnapshot? {
+        throw UnsupportedOperationException("不支持获取直播间详情")
+    }
 
     suspend fun fetchLiveStatusBatch(uids: Iterable<Long>): List<BilibiliLiveSnapshot> {
         throw UnsupportedOperationException("不支持直播状态查询")
@@ -213,6 +252,43 @@ internal class BilibiliPollService(
         )
     }
 
+    override suspend fun fetchVideoSnapshot(videoId: String): BilibiliVideoSnapshot? {
+        val normalized = videoId.trim()
+        if (normalized.isBlank()) return null
+        val aid = normalized.removePrefix("av").removePrefix("AV").toLongOrNull()
+        val bvid = normalized.takeIf { it.startsWith("BV", ignoreCase = true) }
+        val video = client.getVideoDetail(aid = aid, bvid = bvid)
+        applyRequestDelay()
+        return video.toSnapshot()
+    }
+
+    override suspend fun fetchLiveRoomSnapshot(roomId: String): BilibiliLiveRoomSnapshot? {
+        val id = roomId.toLongOrNull() ?: return null
+        val info = client.getLiveInfo(id)
+        applyRequestDelay()
+        return BilibiliLiveRoomSnapshot(
+            userId = info.uid.takeIf { it > 0 }?.toString().orEmpty(),
+            roomId = info.roomId.takeIf { it > 0 }?.toString() ?: roomId,
+            status = when (info.status.value) {
+                1 -> LiveStatus.OPEN
+                2 -> LiveStatus.ROUND
+                else -> LiveStatus.CLOSE
+            },
+            title = info.title,
+            area = listOf(info.parentAreaName, info.areaName)
+                .mapNotNull { it.takeIf(String::isNotBlank) }
+                .distinct()
+                .joinToString(" / ")
+                .takeIf(String::isNotBlank),
+            coverUrl = info.cover.url.toNormalizedBiliImageUrl()
+                ?: info.keyframe.url.toNormalizedBiliImageUrl()
+                ?: info.background.url.toNormalizedBiliImageUrl(),
+            startedAtEpochSeconds = info.liveTime.parseLiveStartEpochSeconds(),
+            online = info.online.takeIf { it > 0 }?.toLong(),
+            attention = info.attention.takeIf { it > 0 }?.toLong(),
+        )
+    }
+
     override suspend fun fetchLiveStatusBatch(uids: Iterable<Long>): List<BilibiliLiveSnapshot> {
         val uidList = uids.toList()
         if (uidList.isEmpty()) return emptyList()
@@ -229,13 +305,7 @@ internal class BilibiliPollService(
                 },
                 title = live.title,
                 area = live.area.takeIf { it.isNotBlank() },
-                coverUrl = live.cover.takeIf { it.isNotBlank() }?.let { cover ->
-                    when {
-                        cover.startsWith("//") -> "https:$cover"
-                        cover.startsWith("/") -> "https://www.bilibili.com$cover"
-                        else -> cover
-                    }
-                },
+                coverUrl = live.cover.toNormalizedBiliImageUrl(),
                 startedAtEpochSeconds = live.liveTime.takeIf { it > 0 },
             )
         }
@@ -393,6 +463,21 @@ internal class BilibiliPollService(
         }
     }
 
+    private fun BiliVideo.toSnapshot(): BilibiliVideoSnapshot {
+        return BilibiliVideoSnapshot(
+            aid = aid,
+            bvid = bvid,
+            title = title,
+            description = desc,
+            coverUrl = cover.url.toNormalizedBiliImageUrl(),
+            ownerId = owner.mid.takeIf { it > 0 }?.toString().orEmpty(),
+            ownerName = owner.name,
+            ownerFaceUrl = owner.face.url.toNormalizedBiliImageUrl(),
+            durationSeconds = duration.takeIf { it > 0 }?.toLong(),
+            publishedAtEpochSeconds = pubTime.takeIf { it > 0 },
+        )
+    }
+
     private suspend fun importAndVerifyCookies(importer: suspend () -> Unit): PublisherLoginResult {
         val previousCookiesJson = client.exportEditCookiesJson()
         return try {
@@ -536,4 +621,18 @@ internal class BilibiliPollService(
             return (this and FOLLOWING_ATTRIBUTE) != 0
         }
     }
+}
+
+private fun String?.toNormalizedBiliImageUrl(): String? {
+    val value = this?.trim()?.takeIf { it.isNotBlank() } ?: return null
+    return when {
+        value.startsWith("//") -> "https:$value"
+        value.startsWith("/") -> "https://www.bilibili.com$value"
+        else -> value
+    }
+}
+
+private fun String?.parseLiveStartEpochSeconds(): Long? {
+    val value = this?.trim()?.takeIf { it.isNotBlank() && it != "0000-00-00 00:00:00" } ?: return null
+    return value.toLongOrNull()
 }

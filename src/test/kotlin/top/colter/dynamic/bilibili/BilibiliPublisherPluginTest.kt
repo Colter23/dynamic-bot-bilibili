@@ -23,7 +23,7 @@ import top.colter.bilibili.data.login.QrCodeLoginData
 import top.colter.bilibili.data.login.QrCodeLoginResult
 import top.colter.bilibili.data.login.QrCodeLoginStatus
 import top.colter.bilibili.data.user.BiliGroup
-import top.colter.bilibili.data.user.BiliUserNav
+import top.colter.bilibili.data.user.BiliUserInfo
 import top.colter.bilibili.exception.BiliLoginException
 import top.colter.dynamic.core.data.EntityState
 import top.colter.dynamic.core.data.LivePayload
@@ -52,7 +52,8 @@ import top.colter.dynamic.core.event.SourceUpdatePublishResult
 import top.colter.dynamic.core.event.SourceUpdatePublisher
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
 import top.colter.dynamic.core.event.SubscriptionChangeType
-import top.colter.dynamic.core.link.DynamicLinkResolution
+import top.colter.dynamic.core.link.LinkKinds
+import top.colter.dynamic.core.link.LinkResolution
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
@@ -180,34 +181,54 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
-    fun `parseDynamicLink should support Bilibili direct dynamic links`() = runBlocking {
+    fun `parseLink should support Bilibili direct dynamic links`() = runBlocking {
         val plugin = testPlugin(defaultGateway())
         plugin.init()
 
-        val parsed = plugin.parseDynamicLink("https://t.bilibili.com/1205230877720707077?spm_id_from=demo")
+        val parsed = plugin.parseLink("https://t.bilibili.com/1205230877720707077?spm_id_from=demo")
 
         requireNotNull(parsed)
         assertEquals("bilibili", parsed.platformId.value)
-        assertEquals("1205230877720707077", parsed.updateId)
+        assertEquals(LinkKinds.DYNAMIC, parsed.kind)
+        assertEquals("1205230877720707077", parsed.targetId)
         assertEquals("https://t.bilibili.com/1205230877720707077", parsed.normalizedUrl)
     }
 
     @Test
-    fun `parseDynamicLink should support Bilibili opus and mobile dynamic links`() = runBlocking {
+    fun `parseLink should support Bilibili opus and mobile dynamic links`() = runBlocking {
         val plugin = testPlugin(defaultGateway())
         plugin.init()
 
-        val opus = plugin.parseDynamicLink("https://www.bilibili.com/opus/774783779415785528")
-        val mobileOpus = plugin.parseDynamicLink("https://m.bilibili.com/opus/774783779415785529")
-        val mobileDynamic = plugin.parseDynamicLink("https://m.bilibili.com/dynamic/774783779415785530")
+        val opus = plugin.parseLink("https://www.bilibili.com/opus/774783779415785528")
+        val mobileOpus = plugin.parseLink("https://m.bilibili.com/opus/774783779415785529")
+        val mobileDynamic = plugin.parseLink("https://m.bilibili.com/dynamic/774783779415785530")
 
-        assertEquals("774783779415785528", opus?.updateId)
-        assertEquals("774783779415785529", mobileOpus?.updateId)
-        assertEquals("774783779415785530", mobileDynamic?.updateId)
+        assertEquals("774783779415785528", opus?.targetId)
+        assertEquals("774783779415785529", mobileOpus?.targetId)
+        assertEquals("774783779415785530", mobileDynamic?.targetId)
     }
 
     @Test
-    fun `parseDynamicLink should expand Bilibili short links`() = runBlocking {
+    fun `parseLink should support Bilibili preview link types`() = runBlocking {
+        val plugin = testPlugin(defaultGateway())
+        plugin.init()
+
+        val video = plugin.parseLink("https://www.bilibili.com/video/BV1xx411c7mD")
+        val mobileVideo = plugin.parseLink("https://m.bilibili.com/video/av170001")
+        val live = plugin.parseLink("https://live.bilibili.com/12345")
+        val user = plugin.parseLink("https://space.bilibili.com/42")
+
+        assertEquals(LinkKinds.VIDEO, video?.kind)
+        assertEquals("BV1xx411c7mD", video?.targetId)
+        assertEquals("av170001", mobileVideo?.targetId)
+        assertEquals(LinkKinds.LIVE, live?.kind)
+        assertEquals("12345", live?.targetId)
+        assertEquals(LinkKinds.USER, user?.kind)
+        assertEquals("42", user?.targetId)
+    }
+
+    @Test
+    fun `parseLink should expand Bilibili short links`() = runBlocking {
         val shortUrl = "https://b23.tv/demo"
         val gateway = defaultGateway(
             shortUrlExpansions = mapOf(shortUrl to "https://www.bilibili.com/opus/774783779415785528?share_source=copy_link"),
@@ -215,26 +236,27 @@ class BilibiliPublisherPluginTest {
         val plugin = testPlugin(gateway, config = testConfig(shortUrlResolveTimeoutSeconds = 0.01))
         plugin.init()
 
-        val parsed = plugin.parseDynamicLink(shortUrl)
+        val parsed = plugin.parseLink(shortUrl)
 
         requireNotNull(parsed)
-        assertEquals("774783779415785528", parsed.updateId)
+        assertEquals(LinkKinds.DYNAMIC, parsed.kind)
+        assertEquals("774783779415785528", parsed.targetId)
         assertEquals("https://t.bilibili.com/774783779415785528", parsed.normalizedUrl)
         assertEquals(shortUrl, parsed.sourceUrl)
         assertEquals(listOf(shortUrl), gateway.expandedShortUrls)
     }
 
     @Test
-    fun `parseDynamicLink should ignore unsupported links`() = runBlocking {
+    fun `parseLink should ignore unsupported links`() = runBlocking {
         val plugin = testPlugin(defaultGateway())
         plugin.init()
 
-        assertNull(plugin.parseDynamicLink("https://www.bilibili.com/video/BV123"))
-        assertNull(plugin.parseDynamicLink("https://example.com/opus/774783779415785528"))
+        assertNull(plugin.parseLink("https://www.bilibili.com/read/cv123"))
+        assertNull(plugin.parseLink("https://example.com/opus/774783779415785528"))
     }
 
     @Test
-    fun `resolveDynamicLink should fetch detail and map dynamic`() = runBlocking {
+    fun `resolveLink should fetch detail and map dynamic`() = runBlocking {
         val detail = buildDynamic(
             epochSeconds = BILI_DYNAMIC_EPOCH_BASE + 123,
             mid = 42,
@@ -245,14 +267,108 @@ class BilibiliPublisherPluginTest {
         val plugin = testPlugin(gateway)
         plugin.init()
 
-        val parsed = plugin.parseDynamicLink("https://t.bilibili.com/${detail.id}")!!
-        val resolution = plugin.resolveDynamicLink(parsed)
+        val parsed = plugin.parseLink("https://t.bilibili.com/${detail.id}")!!
+        val resolution = plugin.resolveLink(parsed)
 
-        assertIs<DynamicLinkResolution.Success>(resolution)
+        assertIs<LinkResolution.Dynamic>(resolution)
         assertEquals(detail.id.toString(), resolution.update.key.externalId)
         assertEquals("42", resolution.update.publisher.externalId)
         assertEquals("demo-up", resolution.update.publisher.name)
         assertEquals(listOf(detail.id.toString()), gateway.requestedDetails)
+    }
+
+    @Test
+    fun `resolveLink should map video preview`() = runBlocking {
+        val gateway = defaultGateway(
+            videoSnapshots = mapOf(
+                "BV1xx411c7mD" to BilibiliVideoSnapshot(
+                    aid = 170001,
+                    bvid = "BV1xx411c7mD",
+                    title = "demo video",
+                    description = "video description",
+                    coverUrl = "https://example.com/video-cover.png",
+                    ownerId = "42",
+                    ownerName = "demo-up",
+                    ownerFaceUrl = "https://example.com/owner-face.png",
+                    play = 12_345,
+                    danmaku = 234,
+                    like = 56,
+                ),
+            ),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val parsed = plugin.parseLink("https://www.bilibili.com/video/BV1xx411c7mD")!!
+        val resolution = plugin.resolveLink(parsed)
+
+        assertIs<LinkResolution.Preview>(resolution)
+        assertEquals(LinkKinds.VIDEO, resolution.preview.kind)
+        assertEquals("demo video", resolution.preview.title)
+        assertEquals("视频", resolution.preview.badge)
+        assertEquals("42", resolution.preview.publisher?.externalId)
+        assertEquals(listOf("play", "danmaku", "like"), resolution.preview.metrics.map { it.key })
+        assertEquals(listOf("BV1xx411c7mD"), gateway.requestedVideos)
+    }
+
+    @Test
+    fun `resolveLink should map live room preview`() = runBlocking {
+        val gateway = defaultGateway(
+            snapshot = BilibiliPublisherSnapshot(
+                userId = "42",
+                name = "live-up",
+                faceUrl = "https://example.com/live-face.png",
+                headerUrl = "https://example.com/live-header.png",
+            ),
+            liveRoomSnapshots = mapOf(
+                "12345" to BilibiliLiveRoomSnapshot(
+                    userId = "42",
+                    roomId = "12345",
+                    status = LiveStatus.OPEN,
+                    title = "demo live",
+                    area = "Games / Demo",
+                    coverUrl = "https://example.com/live-cover.png",
+                    online = 123,
+                    attention = 456,
+                ),
+            ),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val parsed = plugin.parseLink("https://live.bilibili.com/12345")!!
+        val resolution = plugin.resolveLink(parsed)
+
+        assertIs<LinkResolution.Preview>(resolution)
+        assertEquals(LinkKinds.LIVE, resolution.preview.kind)
+        assertEquals("demo live", resolution.preview.title)
+        assertEquals("live-up", resolution.preview.publisher?.name)
+        assertEquals(listOf("online", "follow"), resolution.preview.metrics.map { it.key })
+        assertEquals(listOf("12345"), gateway.requestedLiveRooms)
+    }
+
+    @Test
+    fun `resolveLink should map user preview`() = runBlocking {
+        val gateway = defaultGateway(
+            snapshot = BilibiliPublisherSnapshot(
+                userId = "42",
+                name = "demo-up",
+                faceUrl = "https://example.com/face.png",
+                headerUrl = "https://example.com/header.png",
+            ),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val parsed = plugin.parseLink("https://space.bilibili.com/42")!!
+        val resolution = plugin.resolveLink(parsed)
+
+        assertIs<LinkResolution.Preview>(resolution)
+        assertEquals(LinkKinds.USER, resolution.preview.kind)
+        assertEquals("42", resolution.preview.id)
+        assertEquals("demo-up", resolution.preview.title)
+        assertEquals("用户", resolution.preview.badge)
+        assertEquals("https://example.com/header.png", resolution.preview.cover?.uri)
     }
 
     @Test
@@ -1070,7 +1186,7 @@ class BilibiliPublisherPluginTest {
         val service = BilibiliPollService(
             requestIntervalMs = 0,
             currentUserNavProvider = {
-                BiliUserNav(
+                BiliUserInfo(
                     mid = 123L,
                     name = "demo",
                     face = BiliLazyImage("https://example.com/face.png"),
@@ -1166,15 +1282,20 @@ class BilibiliPublisherPluginTest {
     }
 
     private fun defaultGateway(
+        snapshot: BilibiliPublisherSnapshot? = null,
         dynamicDetails: Map<String, BiliDynamic> = emptyMap(),
         shortUrlExpansions: Map<String, String?> = emptyMap(),
+        videoSnapshots: Map<String, BilibiliVideoSnapshot> = emptyMap(),
+        liveRoomSnapshots: Map<String, BilibiliLiveRoomSnapshot> = emptyMap(),
     ): FakeGateway {
         return FakeGateway(
-            snapshot = null,
+            snapshot = snapshot,
             followState = FollowState.FOLLOWING,
             followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
             dynamicDetails = dynamicDetails,
             shortUrlExpansions = shortUrlExpansions,
+            videoSnapshots = videoSnapshots,
+            liveRoomSnapshots = liveRoomSnapshots,
         )
     }
 
@@ -1257,6 +1378,8 @@ class BilibiliPublisherPluginTest {
         private val exportedCookiesJson: String = "",
         private val dynamicDetails: Map<String, BiliDynamic> = emptyMap(),
         private val shortUrlExpansions: Map<String, String?> = emptyMap(),
+        private val videoSnapshots: Map<String, BilibiliVideoSnapshot> = emptyMap(),
+        private val liveRoomSnapshots: Map<String, BilibiliLiveRoomSnapshot> = emptyMap(),
         private val followRelation: BilibiliFollowRelationSnapshot? = null,
         private val relationFailure: Throwable? = null,
         private val unfollowActionResult: FollowActionResult = FollowActionResult(
@@ -1283,6 +1406,8 @@ class BilibiliPublisherPluginTest {
         val createdGroupNames: MutableList<String> = mutableListOf()
         val addedGroupUsers: MutableList<GroupUsersCall> = mutableListOf()
         val requestedDetails: MutableList<String> = mutableListOf()
+        val requestedVideos: MutableList<String> = mutableListOf()
+        val requestedLiveRooms: MutableList<String> = mutableListOf()
         val expandedShortUrls: MutableList<String> = mutableListOf()
         val unfollowedUsers: MutableList<String> = mutableListOf()
 
@@ -1313,6 +1438,16 @@ class BilibiliPublisherPluginTest {
         override suspend fun fetchDynamicDetail(dynamicId: String): BiliDynamic? {
             requestedDetails.add(dynamicId)
             return dynamicDetails[dynamicId]
+        }
+
+        override suspend fun fetchVideoSnapshot(videoId: String): BilibiliVideoSnapshot? {
+            requestedVideos.add(videoId)
+            return videoSnapshots[videoId]
+        }
+
+        override suspend fun fetchLiveRoomSnapshot(roomId: String): BilibiliLiveRoomSnapshot? {
+            requestedLiveRooms.add(roomId)
+            return liveRoomSnapshots[roomId]
         }
 
         override suspend fun fetchLiveStatusBatch(uids: Iterable<Long>): List<BilibiliLiveSnapshot> {
