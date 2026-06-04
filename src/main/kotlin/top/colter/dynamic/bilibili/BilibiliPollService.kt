@@ -22,7 +22,6 @@ import top.colter.bilibili.data.dynamic.BiliDynamicList
 import top.colter.bilibili.data.login.QrCodeLoginData
 import top.colter.bilibili.data.login.QrCodeLoginResult
 import top.colter.bilibili.data.login.QrCodeLoginStatus
-import top.colter.bilibili.data.user.BiliUserNav
 import top.colter.bilibili.data.user.BiliGroup
 import top.colter.bilibili.exception.BiliLoginException
 import top.colter.dynamic.core.plugin.FollowActionResult
@@ -38,6 +37,7 @@ import top.colter.dynamic.core.data.MediaRef
 import kotlinx.coroutines.CancellationException
 import top.colter.bilibili.api.relation
 import top.colter.bilibili.api.unfollow
+import top.colter.bilibili.data.user.BiliUserInfo
 import java.net.HttpURLConnection
 import java.net.URI
 
@@ -174,7 +174,7 @@ internal class BilibiliClientQrLoginGateway(
 internal class BilibiliPollService(
     private val requestIntervalMs: Long,
     private val client: BiliClient = BiliClient(),
-    private val currentUserNavProvider: suspend () -> BiliUserNav = { client.getCurrentUserNav() },
+    private val currentUserNavProvider: suspend () -> BiliUserInfo = { client.getCurrentUserNav() },
     private val qrLoginGatewayFactory: () -> BilibiliQrLoginGateway = { BilibiliClientQrLoginGateway() },
 ) : BilibiliPlatformGateway {
     override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
@@ -208,7 +208,7 @@ internal class BilibiliPollService(
             name = info.name,
             avatarBadgeKey = info.official.toAvatarBadgeKey(),
             faceUrl = info.face.url,
-            headerUrl = info.header.url,
+            headerUrl = info.header?.image?.url,
             pendantUrl = info.pendant?.image?.url?.takeIf { it.isNotBlank() },
         )
     }
