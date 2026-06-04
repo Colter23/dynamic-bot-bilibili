@@ -12,6 +12,7 @@ private val followLogger = loggerFor<BilibiliFollowService>()
 internal class BilibiliFollowService(
     private val configProvider: () -> BilibiliPublisherConfig,
     private val gatewayProvider: () -> BilibiliPlatformGateway,
+    private val requestFailureHandler: BilibiliRequestFailureHandler,
 ) {
     private val followGroupMutex: Mutex = Mutex()
     private var followGroupId: Long? = null
@@ -27,11 +28,20 @@ internal class BilibiliFollowService(
     }
 
     suspend fun queryFollowState(userId: String): FollowState {
-        return gateway.queryFollowState(userId)
+        return requestFailureHandler.run("关注状态查询 uid=$userId") {
+            gateway.queryFollowState(userId)
+        }.getOrElse { FollowState.UNSUPPORTED }
     }
 
     suspend fun followPublisher(userId: String): FollowActionResult {
-        val result = gateway.followPublisher(userId)
+        val result = requestFailureHandler.run("关注发布者 uid=$userId") {
+            gateway.followPublisher(userId)
+        }.getOrElse { error ->
+            return FollowActionResult(
+                FollowActionStatus.FAILED,
+                error.message ?: "Bilibili 关注失败",
+            )
+        }
         if (result.status == FollowActionStatus.FOLLOWED || result.status == FollowActionStatus.ALREADY_FOLLOWING) {
             addPublisherToFollowGroup(userId)
         }
@@ -42,12 +52,8 @@ internal class BilibiliFollowService(
         val groupId = findExistingFollowGroupId()
             ?: return skipAutoUnfollow(userId, "未配置或未找到 Bot 关注分组")
 
-        val relation = runCatching {
+        val relation = requestFailureHandler.run("关注关系查询 uid=$userId") {
             gateway.fetchFollowRelation(userId)
-        }.onFailure {
-            followLogger.warn(it) {
-                "Bilibili 自动取消关注关系查询失败：uid=$userId"
-            }
         }.getOrNull() ?: return skipAutoUnfollow(userId, "关注关系查询失败")
 
         if (!relation.following) {
@@ -57,12 +63,8 @@ internal class BilibiliFollowService(
             return skipAutoUnfollow(userId, "UP 主不只属于 Bot 关注分组：tagIds=${relation.tagIds}，botGroupId=$groupId")
         }
 
-        val result = runCatching {
+        val result = requestFailureHandler.run("取消关注发布者 uid=$userId") {
             gateway.unfollowPublisher(userId)
-        }.onFailure {
-            followLogger.warn(it) {
-                "Bilibili 自动取消关注失败：uid=$userId，groupId=$groupId"
-            }
         }.getOrElse { error ->
             return FollowActionResult(
                 FollowActionStatus.FAILED,
@@ -89,7 +91,7 @@ internal class BilibiliFollowService(
     private suspend fun addPublisherToFollowGroup(userId: String) {
         val groupId = ensureFollowGroupId() ?: return
         val uid = userId.toLongOrNull() ?: return
-        runCatching {
+        requestFailureHandler.run("加入关注分组 uid=$userId groupId=$groupId") {
             gateway.addUsersToFollowGroup(listOf(uid), listOf(groupId))
         }.onFailure {
             followLogger.warn(it) {
@@ -123,12 +125,8 @@ internal class BilibiliFollowService(
     }
 
     private suspend fun resolveFollowGroupId(groupName: String, createIfMissing: Boolean): Long? {
-        val existingGroups = runCatching {
+        val existingGroups = requestFailureHandler.run("读取关注分组 name=$groupName") {
             gateway.fetchFollowGroups()
-        }.onFailure {
-            followLogger.warn(it) {
-                "读取 Bilibili 关注分组失败：name=$groupName"
-            }
         }.getOrNull() ?: return null
 
         existingGroups.firstOrNull { it.name == groupName }?.let { matched ->
@@ -145,7 +143,7 @@ internal class BilibiliFollowService(
             return null
         }
 
-        runCatching {
+        requestFailureHandler.run("创建关注分组 name=$groupName") {
             gateway.createFollowGroup(groupName)
         }.onFailure {
             followLogger.warn(it) {
@@ -153,12 +151,8 @@ internal class BilibiliFollowService(
             }
         }
 
-        val refreshedGroups = runCatching {
+        val refreshedGroups = requestFailureHandler.run("重新读取关注分组 name=$groupName") {
             gateway.fetchFollowGroups()
-        }.onFailure {
-            followLogger.warn(it) {
-                "重新读取 Bilibili 关注分组失败：name=$groupName"
-            }
         }.getOrNull() ?: return null
 
         val createdGroup = refreshedGroups.firstOrNull { it.name == groupName }

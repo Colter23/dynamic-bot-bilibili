@@ -14,11 +14,8 @@ import top.colter.dynamic.core.link.LinkKinds
 import top.colter.dynamic.core.link.LinkPreview
 import top.colter.dynamic.core.link.LinkResolution
 import top.colter.dynamic.core.link.ParsedLink
-import top.colter.dynamic.core.tools.loggerFor
 import java.net.URI
 import kotlin.math.roundToLong
-
-private val linkResolverLogger = loggerFor<BilibiliLinkResolver>()
 
 internal class BilibiliLinkResolver(
     private val platformId: PlatformId,
@@ -26,6 +23,7 @@ internal class BilibiliLinkResolver(
     private val gatewayProvider: () -> BilibiliPlatformGateway,
     private val mapper: BilibiliDynamicMapper,
     private val publisherInfoResolver: suspend (String) -> PublisherInfo?,
+    private val requestFailureHandler: BilibiliRequestFailureHandler,
 ) {
     private val config: BilibiliPublisherConfig
         get() = configProvider()
@@ -40,15 +38,11 @@ internal class BilibiliLinkResolver(
         parseDirectLink(normalizedInput)?.let { return it }
         if (!isBilibiliShortUrl(normalizedInput)) return null
 
-        val expanded = runCatching {
+        val expanded = requestFailureHandler.run("短链展开 url=$normalizedInput") {
             gateway.expandShortUrl(
                 normalizedInput,
                 secondsToMillis(config.shortUrlResolveTimeoutSeconds, minimumMillis = 1),
             )
-        }.onFailure {
-            linkResolverLogger.warn(it) {
-                "Bilibili 短链解析失败：url=$normalizedInput"
-            }
         }.getOrNull() ?: return null
 
         return parseDirectLink(expanded)?.copy(sourceUrl = normalizedInput)
@@ -71,7 +65,9 @@ internal class BilibiliLinkResolver(
             }
         }
 
-        val source = runCatching { gateway.fetchDynamicDetail(parsedLink.targetId) }
+        val source = requestFailureHandler.run("动态详情解析 id=${parsedLink.targetId}") {
+            gateway.fetchDynamicDetail(parsedLink.targetId)
+        }
             .getOrElse { error ->
                 return LinkResolution.Failed(
                     parsedLink = parsedLink,
@@ -94,7 +90,9 @@ internal class BilibiliLinkResolver(
     }
 
     private suspend fun resolveVideoPreview(parsedLink: ParsedLink): LinkResolution {
-        val snapshot = runCatching { gateway.fetchVideoSnapshot(parsedLink.targetId) }
+        val snapshot = requestFailureHandler.run("视频详情解析 id=${parsedLink.targetId}") {
+            gateway.fetchVideoSnapshot(parsedLink.targetId)
+        }
             .getOrElse { error ->
                 return LinkResolution.Failed(
                     parsedLink = parsedLink,
@@ -126,7 +124,9 @@ internal class BilibiliLinkResolver(
     }
 
     private suspend fun resolveLivePreview(parsedLink: ParsedLink): LinkResolution {
-        val snapshot = runCatching { gateway.fetchLiveRoomSnapshot(parsedLink.targetId) }
+        val snapshot = requestFailureHandler.run("直播间详情解析 roomId=${parsedLink.targetId}") {
+            gateway.fetchLiveRoomSnapshot(parsedLink.targetId)
+        }
             .getOrElse { error ->
                 return LinkResolution.Failed(
                     parsedLink = parsedLink,

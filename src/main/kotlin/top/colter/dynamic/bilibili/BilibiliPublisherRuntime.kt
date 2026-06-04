@@ -35,7 +35,6 @@ import top.colter.dynamic.core.link.LinkResolution
 import top.colter.dynamic.core.link.LinkResolver
 import top.colter.dynamic.core.link.ParsedLink
 import top.colter.dynamic.core.plugin.FollowActionResult
-import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
 import top.colter.dynamic.core.plugin.PluginContext
 import top.colter.dynamic.core.plugin.PublisherFollowPlugin
@@ -103,6 +102,7 @@ internal class BilibiliPublisherRuntime() :
     private lateinit var mapper: BilibiliDynamicMapper
     private lateinit var linkResolver: BilibiliLinkResolver
     private lateinit var followService: BilibiliFollowService
+    private lateinit var requestFailureHandler: BilibiliRequestFailureHandler
     private lateinit var cursorStore: BilibiliCursorStore
     private lateinit var liveStatusStore: BilibiliLiveStatusStore
     private lateinit var detectTask: TaskDefinition
@@ -159,16 +159,21 @@ internal class BilibiliPublisherRuntime() :
         config = loadConfig(pluginId)
         pollService = serviceFactory(secondsToMillis(config.requestIntervalSeconds, minimumMillis = 0))
         mapper = BilibiliDynamicMapper()
+        requestFailureHandler = BilibiliRequestFailureHandler(
+            configProvider = { config },
+        )
         linkResolver = BilibiliLinkResolver(
             platformId = platformId,
             configProvider = { config },
             gatewayProvider = { pollService },
             mapper = mapper,
             publisherInfoResolver = ::fetchPublisherInfo,
+            requestFailureHandler = requestFailureHandler,
         )
         followService = BilibiliFollowService(
             configProvider = { config },
             gatewayProvider = { pollService },
+            requestFailureHandler = requestFailureHandler,
         )
         cursorStore = cursorStoreFactory()
         liveStatusStore = liveStatusStoreFactory()
@@ -188,6 +193,7 @@ internal class BilibiliPublisherRuntime() :
     override suspend fun onStart() {
         val loginResult = pollService.checkLoginState()
         if (loginResult.status == PublisherLoginStatus.SUCCESS) {
+            requestFailureHandler.recordSuccess("登录状态检查")
             val taskStarted = bootstrapLoggedInState(allowReplay = true)
             logger.info {
                 "Bilibili 轮询已就绪：账号=${loginResult.account?.name ?: loginResult.account?.userId ?: "未知"}，任务新启动=$taskStarted"
@@ -245,7 +251,9 @@ internal class BilibiliPublisherRuntime() :
     }
 
     override suspend fun fetchPublisherInfo(userId: String): PublisherInfo? {
-        val snapshot = pollService.fetchPublisherSnapshot(userId) ?: return null
+        val snapshot = runBilibiliRequest("发布者资料查询 uid=$userId") {
+            pollService.fetchPublisherSnapshot(userId)
+        }.getOrNull() ?: return null
         return PublisherInfo(
             key = PublisherKey.of(platformId.value, PublisherKind.USER, snapshot.userId),
             name = snapshot.name,
@@ -303,6 +311,7 @@ internal class BilibiliPublisherRuntime() :
         val result = pollService.loginByCookie(cookie)
         persistCookiesIfLoggedIn(result)
         if (result.status == PublisherLoginStatus.SUCCESS) {
+            requestFailureHandler.recordSuccess("Cookie 登录")
             bootstrapLoggedInState(allowReplay = !taskScheduler.isRunning(detectTaskId))
         }
         return result
@@ -315,12 +324,17 @@ internal class BilibiliPublisherRuntime() :
         val result = pollService.loginByQrCode(onQrCode, onStatusChanged)
         persistCookiesIfLoggedIn(result)
         if (result.status == PublisherLoginStatus.SUCCESS) {
+            requestFailureHandler.recordSuccess("二维码登录")
             bootstrapLoggedInState(allowReplay = !taskScheduler.isRunning(detectTaskId))
         }
         return result
     }
 
     private suspend fun detectAndPublish() {
+        if (::requestFailureHandler.isInitialized && requestFailureHandler.isPollingPaused()) {
+            logger.debug { "Bilibili 检测跳过：登录状态失效，轮询请求已暂停" }
+            return
+        }
         if (!detectMutex.tryLock()) {
             pendingDetection = true
             logger.debug { "Bilibili 检测仍在执行，本轮已标记为补跑" }
@@ -337,6 +351,13 @@ internal class BilibiliPublisherRuntime() :
         }
     }
 
+    private suspend fun <T> runBilibiliRequest(
+        operation: String,
+        block: suspend () -> T,
+    ): Result<T> {
+        return requestFailureHandler.run(operation, block)
+    }
+
     private suspend fun detectAndPublishLocked() {
         loadActivePublishers(logSummary = false)
         val dynamicPublisherSnapshot = dynamicPublishers
@@ -348,14 +369,9 @@ internal class BilibiliPublisherRuntime() :
 
         if (dynamicPublisherSnapshot.isNotEmpty()) {
             val start = System.currentTimeMillis()
-            val followedDynamics = runCatching {
+            val followedDynamics = runBilibiliRequest("动态轮询") {
                 pollService.fetchNewDynamicPage(1).items
             }
-                .onFailure {
-                    logger.warn(it) {
-                        "Bilibili 动态轮询失败"
-                    }
-                }
                 .getOrElse { emptyList() }
             val latency = System.currentTimeMillis() - start
             val dynamicsByPublisher = followedDynamics
@@ -399,6 +415,7 @@ internal class BilibiliPublisherRuntime() :
                     }
             }
         }
+        if (requestFailureHandler.isPollingPaused()) return
         detectLiveStatusChanges(livePublisherSnapshot)
     }
 
@@ -441,12 +458,7 @@ internal class BilibiliPublisherRuntime() :
         val publisherSnapshot = dynamicPublishers
         if (publisherSnapshot.isEmpty()) return
 
-        val followedDynamics = runCatching { pollService.fetchNewDynamicPage(1).items }
-            .onFailure {
-                logger.warn(it) {
-                    "Bilibili 动态游标预热拉取失败"
-                }
-            }
+        val followedDynamics = runBilibiliRequest("动态游标预热") { pollService.fetchNewDynamicPage(1).items }
             .getOrElse { emptyList() }
         if (followedDynamics.isEmpty()) return
 
@@ -537,12 +549,13 @@ internal class BilibiliPublisherRuntime() :
         val result = linkedMapOf<Long, BilibiliLiveSnapshot>()
         val unavailable = linkedSetOf<Long>()
         uids.chunked(batchSize).forEach { batch ->
-            val snapshots = runCatching {
+            if (requestFailureHandler.isPollingPaused()) {
+                unavailable.addAll(batch)
+                return@forEach
+            }
+            val snapshots = runBilibiliRequest("直播状态拉取 uids=$batch") {
                 pollService.fetchLiveStatusBatch(batch)
             }.onFailure {
-                logger.warn(it) {
-                    "Bilibili 直播状态拉取失败：uids=$batch"
-                }
                 unavailable.addAll(batch)
             }.getOrNull() ?: return@forEach
             val returnedUids = linkedSetOf<Long>()
@@ -676,7 +689,9 @@ internal class BilibiliPublisherRuntime() :
 
         var page = 1
         while (true) {
-            val pageFetch = runCatching { pollService.fetchNewDynamicPage(page) }
+            val pageFetch = runBilibiliRequest("历史动态补发 page=$page") {
+                pollService.fetchNewDynamicPage(page)
+            }
             if (pageFetch.isFailure) {
                 val error = pageFetch.exceptionOrNull()
                 if (collectedDynamics.isEmpty()) {

@@ -13,6 +13,7 @@ public data class BilibiliPublisherConfig(
     val shortUrlResolveTimeoutSeconds: Double = 3.0,
     val liveDetectionEnabled: Boolean = true,
     val liveStatusBatchSize: Int = 30,
+    val maxConsecutiveLoginFailures: Int = 3,
     val cookiesJson: String = "",
 )
 
@@ -91,6 +92,15 @@ public object BilibiliPublisherConfigForm {
                 min = 1,
                 numberKind = ConfigNumberKind.INTEGER,
             ),
+            ConfigFieldSpec(
+                path = "maxConsecutiveLoginFailures",
+                label = "未登录熔断次数",
+                type = ConfigFieldType.NUMBER,
+                section = "异常处理",
+                description = "轮询请求连续触发未登录异常达到该次数后暂停 Bilibili 轮询请求；0 表示不自动暂停。",
+                min = 0,
+                numberKind = ConfigNumberKind.INTEGER,
+            ),
         ),
     )
 
@@ -100,5 +110,6 @@ public object BilibiliPublisherConfigForm {
         require(config.replayWindowMinutes >= 0) { "补发时间窗口不能为负数" }
         require(config.shortUrlResolveTimeoutSeconds > 0.0) { "短链接解析超时必须大于 0 秒" }
         require(config.liveStatusBatchSize >= 1) { "直播状态批量查询数量不能小于 1" }
+        require(config.maxConsecutiveLoginFailures >= 0) { "未登录熔断次数不能为负数" }
     }
 }

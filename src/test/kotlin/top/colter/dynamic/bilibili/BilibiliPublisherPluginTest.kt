@@ -397,6 +397,44 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `polling should pause requests after consecutive login exceptions`() = runBlocking {
+        val scheduler = testScheduler()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            failingDynamicPages = setOf(1),
+            dynamicPageFailure = BiliLoginException("cookie expired"),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(
+                pollingIntervalSeconds = 0.025,
+                maxConsecutiveLoginFailures = 2,
+            ),
+            taskScheduler = scheduler,
+        )
+        seedPublisherAndSubscriber()
+
+        plugin.init()
+        plugin.start()
+
+        withTimeout(3_000) {
+            while (gateway.requestedPages.size < 2) {
+                delay(10)
+            }
+        }
+        val requestCountAfterPause = gateway.requestedPages.size
+        delay(150)
+
+        assertEquals(requestCountAfterPause, gateway.requestedPages.size)
+        assertTrue(scheduler.isRunning("bilibili-detect"))
+
+        plugin.stop()
+    }
+
+    @Test
     fun `replay window zero should warm up current page only`() {
         val now = System.currentTimeMillis() / 1000
         val cursorStore = InMemoryCursorStore()
@@ -1260,6 +1298,7 @@ class BilibiliPublisherPluginTest {
         shortUrlResolveTimeoutSeconds: Double = 3.0,
         liveDetectionEnabled: Boolean = true,
         liveStatusBatchSize: Int = 50,
+        maxConsecutiveLoginFailures: Int = 3,
     ): BilibiliPublisherConfig {
         return BilibiliPublisherConfig(
             pollingIntervalSeconds = pollingIntervalSeconds,
@@ -1269,6 +1308,7 @@ class BilibiliPublisherPluginTest {
             shortUrlResolveTimeoutSeconds = shortUrlResolveTimeoutSeconds,
             liveDetectionEnabled = liveDetectionEnabled,
             liveStatusBatchSize = liveStatusBatchSize,
+            maxConsecutiveLoginFailures = maxConsecutiveLoginFailures,
         )
     }
 
@@ -1388,6 +1428,7 @@ class BilibiliPublisherPluginTest {
         ),
         initialDynamicPages: Map<Int, BiliDynamicList> = emptyMap(),
         failingDynamicPages: Set<Int> = emptySet(),
+        private val dynamicPageFailure: Throwable? = null,
         initialGroups: List<BiliGroup> = emptyList(),
         initialLiveSnapshots: Map<Long, BilibiliLiveSnapshot> = emptyMap(),
         failingLiveBatches: Set<List<Long>> = emptySet(),
@@ -1414,7 +1455,7 @@ class BilibiliPublisherPluginTest {
         override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
             requestedPages.add(page)
             if (page in dynamicPageFailures) {
-                error("dynamic page failed: $page")
+                throw dynamicPageFailure ?: IllegalStateException("dynamic page failed: $page")
             }
             return dynamicPages[page] ?: BiliDynamicList(
                 hasMore = false,
