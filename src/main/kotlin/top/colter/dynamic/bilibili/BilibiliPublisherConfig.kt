@@ -9,7 +9,7 @@ public data class BilibiliPublisherConfig(
     val pollingIntervalSeconds: Double = 15.0,
     val requestIntervalSeconds: Double = 0.5,
     val replayWindowMinutes: Int = 0,
-    val followGroupName: String = "",
+    val followGroupName: String = "Bot关注",
     val shortUrlResolveTimeoutSeconds: Double = 3.0,
     val liveDetectionEnabled: Boolean = true,
     val liveStatusBatchSize: Int = 30,
