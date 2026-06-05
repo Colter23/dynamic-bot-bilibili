@@ -7,12 +7,17 @@ import top.colter.bilibili.exception.BiliEmptyException
 import top.colter.bilibili.exception.BiliException
 import top.colter.bilibili.exception.BiliLoginException
 import top.colter.bilibili.exception.BiliRequestException
+import top.colter.dynamic.core.event.NoopSystemNotificationPublisher
+import top.colter.dynamic.core.event.SystemNotificationPublishRequest
+import top.colter.dynamic.core.event.SystemNotificationPublisher
+import top.colter.dynamic.core.event.SystemNotificationSeverity
 import top.colter.dynamic.core.tools.loggerFor
 
 private val requestFailureLogger = loggerFor<BilibiliRequestFailureHandler>()
 
 internal class BilibiliRequestFailureHandler(
     private val configProvider: () -> BilibiliPublisherConfig,
+    private val notificationPublisher: SystemNotificationPublisher = NoopSystemNotificationPublisher,
 ) {
     private var consecutiveLoginFailures: Int = 0
     private var pollingPausedByLoginFailure: Boolean = false
@@ -33,7 +38,8 @@ internal class BilibiliRequestFailureHandler(
         }
     }
 
-    fun recordSuccess(operation: String) {
+    suspend fun recordSuccess(operation: String) {
+        val wasPaused = pollingPausedByLoginFailure
         if (consecutiveLoginFailures > 0 || pollingPausedByLoginFailure) {
             requestFailureLogger.info {
                 "Bilibili 请求已恢复：operation=$operation，之前连续未登录失败=$consecutiveLoginFailures"
@@ -41,9 +47,21 @@ internal class BilibiliRequestFailureHandler(
         }
         consecutiveLoginFailures = 0
         pollingPausedByLoginFailure = false
+        if (wasPaused) {
+            publishNotification(
+                SystemNotificationPublishRequest(
+                    type = "bilibili.login_recovered",
+                    severity = SystemNotificationSeverity.INFO,
+                    title = "Bilibili 登录状态已恢复",
+                    content = "Bilibili 请求已恢复，轮询可以继续执行。",
+                    dedupeKey = "bilibili.login_recovered",
+                    details = mapOf("operation" to operation),
+                ),
+            )
+        }
     }
 
-    fun recordFailure(operation: String, error: Throwable) {
+    suspend fun recordFailure(operation: String, error: Throwable) {
         if (error is CancellationException) throw error
 
         when (error) {
@@ -77,7 +95,7 @@ internal class BilibiliRequestFailureHandler(
         }
     }
 
-    private fun recordLoginFailure(operation: String, error: BiliLoginException) {
+    private suspend fun recordLoginFailure(operation: String, error: BiliLoginException) {
         consecutiveLoginFailures += 1
         val threshold = configProvider().maxConsecutiveLoginFailures
         if (threshold > 0 && consecutiveLoginFailures >= threshold) {
@@ -86,6 +104,21 @@ internal class BilibiliRequestFailureHandler(
                 requestFailureLogger.error(error) {
                     "Bilibili 登录状态失效，已暂停轮询请求：operation=$operation，连续未登录失败=$consecutiveLoginFailures，阈值=$threshold。请重新登录或更新 Cookie。"
                 }
+                publishNotification(
+                    SystemNotificationPublishRequest(
+                        type = "bilibili.login_paused",
+                        severity = SystemNotificationSeverity.ERROR,
+                        title = "Bilibili 登录状态失效",
+                        content = "Bilibili 连续请求未登录，已暂停轮询请求。请重新登录或更新 Cookie。",
+                        dedupeKey = "bilibili.login_paused",
+                        details = mapOf(
+                            "operation" to operation,
+                            "consecutiveLoginFailures" to consecutiveLoginFailures.toString(),
+                            "threshold" to threshold.toString(),
+                            "error" to (error.message ?: "未知"),
+                        ),
+                    ),
+                )
             } else {
                 requestFailureLogger.warn(error) {
                     "Bilibili 轮询仍处于未登录暂停状态：operation=$operation，连续未登录失败=$consecutiveLoginFailures，阈值=$threshold"
@@ -119,5 +152,12 @@ internal class BilibiliRequestFailureHandler(
         requestFailureLogger.warn(error) {
             "Bilibili 请求出现未知异常：operation=$operation，类型=${error::class.qualifiedName ?: error::class.simpleName ?: "未知"}，原因=${error.message ?: "未知"}"
         }
+    }
+
+    private suspend fun publishNotification(request: SystemNotificationPublishRequest) {
+        runCatching { notificationPublisher.publish(request) }
+            .onFailure {
+                requestFailureLogger.warn(it) { "Bilibili 系统通知发布失败：type=${request.type}" }
+            }
     }
 }

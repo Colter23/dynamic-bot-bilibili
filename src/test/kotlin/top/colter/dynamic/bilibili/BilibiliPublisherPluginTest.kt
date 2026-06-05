@@ -44,6 +44,7 @@ import top.colter.dynamic.core.data.SubscriptionPolicy
 import top.colter.dynamic.core.data.SubscriptionSubscriber
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
+import top.colter.dynamic.core.config.ConfigMigration
 import top.colter.dynamic.core.config.ConfigService
 import top.colter.dynamic.core.config.PluginDataStore
 import top.colter.dynamic.core.command.CommandPublisher
@@ -1673,7 +1674,12 @@ class BilibiliPublisherPluginTest {
         private val values: MutableMap<String, Any> = linkedMapOf()
         private val root: Path = createTempDirectory("dynamic-bot-bilibili-config")
 
-        override fun <T : Any> loadOrCreate(pluginId: String, clazz: KClass<T>, defaultProvider: () -> T): T {
+        override fun <T : Any> loadOrCreate(
+            pluginId: String,
+            clazz: KClass<T>,
+            migrations: List<ConfigMigration>,
+            defaultProvider: () -> T,
+        ): T {
             val value = values.getOrPut(pluginId) { defaultProvider() }
             @Suppress("UNCHECKED_CAST")
             return value as T
@@ -1683,7 +1689,11 @@ class BilibiliPublisherPluginTest {
             values[pluginId] = config
         }
 
-        override fun <T : Any> reload(pluginId: String, clazz: KClass<T>): T {
+        override fun <T : Any> reload(
+            pluginId: String,
+            clazz: KClass<T>,
+            migrations: List<ConfigMigration>,
+        ): T {
             @Suppress("UNCHECKED_CAST")
             return values.getValue(pluginId) as T
         }
@@ -1699,7 +1709,12 @@ class BilibiliPublisherPluginTest {
         override val dataDir: Path = createTempDirectory("dynamic-bot-bilibili-data").resolve(pluginId)
         private val values: MutableMap<String, Any> = linkedMapOf()
 
-        override fun <T : Any> loadOrCreate(name: String, clazz: KClass<T>, defaultProvider: () -> T): T {
+        override fun <T : Any> loadOrCreate(
+            name: String,
+            clazz: KClass<T>,
+            migrations: List<ConfigMigration>,
+            defaultProvider: () -> T,
+        ): T {
             val value = values.getOrPut(name) { defaultProvider() }
             @Suppress("UNCHECKED_CAST")
             return value as T
@@ -1709,7 +1724,11 @@ class BilibiliPublisherPluginTest {
             values[name] = value
         }
 
-        override fun <T : Any> reload(name: String, clazz: KClass<T>): T {
+        override fun <T : Any> reload(
+            name: String,
+            clazz: KClass<T>,
+            migrations: List<ConfigMigration>,
+        ): T {
             @Suppress("UNCHECKED_CAST")
             return values.getValue(name) as T
         }

@@ -29,6 +29,10 @@ import top.colter.dynamic.core.data.hasSeen
 import top.colter.dynamic.core.data.replayLowerBoundAtEpochSeconds
 import top.colter.dynamic.core.event.SourceUpdatePublishRequest
 import top.colter.dynamic.core.event.SourceUpdatePublisher
+import top.colter.dynamic.core.event.NoopSystemNotificationPublisher
+import top.colter.dynamic.core.event.SystemNotificationPublishRequest
+import top.colter.dynamic.core.event.SystemNotificationPublisher
+import top.colter.dynamic.core.event.SystemNotificationSeverity
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
 import top.colter.dynamic.core.event.SubscriptionChangeType
 import top.colter.dynamic.core.link.LinkResolution
@@ -90,6 +94,7 @@ internal class BilibiliPublisherRuntime() :
     private var saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> }
     private lateinit var taskScheduler: TaskScheduler
     private lateinit var sourceUpdatePublisher: SourceUpdatePublisher
+    private var notificationPublisher: SystemNotificationPublisher = NoopSystemNotificationPublisher
     private lateinit var subscriptionQueryService: SubscriptionQueryService
     private var useContextTaskScheduler: Boolean = true
     private var useContextStateStores: Boolean = true
@@ -144,6 +149,7 @@ internal class BilibiliPublisherRuntime() :
     override suspend fun onLoad(context: PluginContext) {
         pluginId = context.pluginId
         sourceUpdatePublisher = context.sourceUpdatePublisher
+        notificationPublisher = context.notificationPublisher
         subscriptionQueryService = context.subscriptionQueryService
         if (useContextTaskScheduler) {
             taskScheduler = context.taskScheduler
@@ -161,6 +167,7 @@ internal class BilibiliPublisherRuntime() :
         mapper = BilibiliDynamicMapper()
         requestFailureHandler = BilibiliRequestFailureHandler(
             configProvider = { config },
+            notificationPublisher = notificationPublisher,
         )
         linkResolver = BilibiliLinkResolver(
             platformId = platformId,
@@ -201,6 +208,21 @@ internal class BilibiliPublisherRuntime() :
         } else {
             logger.warn {
                 "Bilibili 轮询未启动：登录状态=${loginResult.status}，原因=${loginResult.message}"
+            }
+            if (config.cookiesJson.isNotBlank()) {
+                publishNotification(
+                    SystemNotificationPublishRequest(
+                        type = "bilibili.start_login_failed",
+                        severity = SystemNotificationSeverity.WARN,
+                        title = "Bilibili 登录检查失败",
+                        content = "Bilibili 插件启动时检测到登录状态不可用，轮询未启动。请重新登录或更新 Cookie。",
+                        dedupeKey = "bilibili.start_login_failed:$pluginId",
+                        details = mapOf(
+                            "status" to loginResult.status.name,
+                            "message" to loginResult.message,
+                        ),
+                    ),
+                )
             }
         }
     }
@@ -769,6 +791,13 @@ internal class BilibiliPublisherRuntime() :
             }
         }
         return result.accepted
+    }
+
+    private suspend fun publishNotification(request: SystemNotificationPublishRequest) {
+        runCatching { notificationPublisher.publish(request) }
+            .onFailure {
+                logger.warn(it) { "Bilibili 系统通知发布失败：type=${request.type}" }
+            }
     }
 
     private suspend fun ensureLiveBaseline(publisher: Publisher) {
