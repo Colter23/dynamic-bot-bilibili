@@ -47,7 +47,7 @@ public object BilibiliPublisherConfigForm {
                 label = "补发时间窗口（分钟）",
                 type = ConfigFieldType.NUMBER,
                 section = "补发",
-                description = "插件启动或重新登录后补发该时间窗口内游标遗漏的动态；0 表示不补发历史动态。",
+                description = "插件启动或重新登录后补发该时间窗口内游标遗漏的动态；0 表示不补发历史动态，停机期间的新动态也只预热游标不推送。",
                 min = 0,
                 numberKind = ConfigNumberKind.INTEGER,
             ),

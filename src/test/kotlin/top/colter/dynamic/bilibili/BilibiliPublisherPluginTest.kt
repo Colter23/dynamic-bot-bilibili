@@ -137,7 +137,7 @@ class BilibiliPublisherPluginTest {
                 pendantUrl = "https://example.com/pendant.png",
             ),
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
         )
         val plugin = testPlugin(gateway)
         plugin.init()
@@ -155,7 +155,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.NOT_FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
         )
         val plugin = testPlugin(gateway)
         plugin.init()
@@ -380,7 +380,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.FAILED, "not logged in"),
         )
         val plugin = testPlugin(
@@ -405,7 +405,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
             failingDynamicPages = setOf(1),
             dynamicPageFailure = BiliLoginException("cookie expired"),
@@ -444,7 +444,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
             initialDynamicPages = emptyMap(),
         )
@@ -497,7 +497,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
             initialDynamicPages = emptyMap(),
         )
@@ -552,7 +552,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
             initialDynamicPages = emptyMap(),
             failingDynamicPages = setOf(2),
@@ -604,7 +604,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.NOT_FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
         )
         val plugin = testPlugin(
@@ -618,7 +618,7 @@ class BilibiliPublisherPluginTest {
 
         val result = plugin.followPublisher("123")
 
-        assertEquals(FollowActionStatus.FOLLOWED, result.status)
+        assertEquals(FollowActionStatus.DONE, result.status)
         assertEquals(listOf("Bot关注"), gateway.createdGroupNames)
         assertEquals(2, gateway.groupFetchCount)
         assertEquals(
@@ -635,7 +635,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.NOT_FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
         )
         val plugin = testPlugin(
@@ -648,7 +648,7 @@ class BilibiliPublisherPluginTest {
         plugin.start()
         val result = plugin.followPublisher("123")
 
-        assertEquals(FollowActionStatus.FOLLOWED, result.status)
+        assertEquals(FollowActionStatus.DONE, result.status)
         assertEquals(0, gateway.groupFetchCount)
         assertTrue(gateway.createdGroupNames.isEmpty())
         assertTrue(gateway.addedGroupUsers.isEmpty())
@@ -661,7 +661,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
             followRelation = BilibiliFollowRelationSnapshot(
                 userId = "123",
@@ -677,7 +677,7 @@ class BilibiliPublisherPluginTest {
         plugin.init()
         val result = plugin.unfollowPublisher("123")
 
-        assertEquals(FollowActionStatus.FOLLOWED, result.status)
+        assertEquals(FollowActionStatus.DONE, result.status)
         assertEquals(listOf("123"), gateway.unfollowedUsers)
         assertEquals(1, gateway.groupFetchCount)
         assertTrue(gateway.createdGroupNames.isEmpty())
@@ -688,7 +688,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
             followRelation = BilibiliFollowRelationSnapshot(
                 userId = "123",
@@ -704,7 +704,7 @@ class BilibiliPublisherPluginTest {
         plugin.init()
         val result = plugin.unfollowPublisher("123")
 
-        assertEquals(FollowActionStatus.FAILED, result.status)
+        assertEquals(FollowActionStatus.NOOP, result.status)
         assertTrue(gateway.unfollowedUsers.isEmpty())
         assertEquals(1, gateway.groupFetchCount)
     }
@@ -714,7 +714,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
             followRelation = BilibiliFollowRelationSnapshot(
                 userId = "123",
@@ -730,7 +730,7 @@ class BilibiliPublisherPluginTest {
         plugin.init()
         val result = plugin.unfollowPublisher("123")
 
-        assertEquals(FollowActionStatus.FAILED, result.status)
+        assertEquals(FollowActionStatus.NOOP, result.status)
         assertTrue(gateway.unfollowedUsers.isEmpty())
         assertEquals(1, gateway.groupFetchCount)
     }
@@ -770,7 +770,7 @@ class BilibiliPublisherPluginTest {
             val gateway = FakeGateway(
                 snapshot = null,
                 followState = FollowState.FOLLOWING,
-                followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+                followActionResult = FollowActionResult(FollowActionStatus.DONE),
                 initialGroups = case.initialGroups,
                 followRelation = case.relation,
                 relationFailure = case.relationFailure,
@@ -783,7 +783,7 @@ class BilibiliPublisherPluginTest {
             plugin.init()
             val result = plugin.unfollowPublisher("123")
 
-            assertEquals(FollowActionStatus.FAILED, result.status, case.name)
+            assertEquals(FollowActionStatus.NOOP, result.status, case.name)
             assertTrue(gateway.unfollowedUsers.isEmpty(), case.name)
             assertEquals(case.expectedGroupFetchCount, gateway.groupFetchCount, case.name)
             assertTrue(gateway.createdGroupNames.isEmpty(), case.name)
@@ -796,7 +796,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.FAILED, "not logged in"),
             cookieLoginResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "cookie login success"),
             exportedCookiesJson = """
@@ -835,7 +835,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(
                 PublisherLoginStatus.SUCCESS,
                 "logged in",
@@ -859,7 +859,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.FAILED, "not logged in"),
             qrLoginResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "qr login success"),
             exportedCookiesJson = """
@@ -899,7 +899,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
         )
         val plugin = testPlugin(
@@ -925,7 +925,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
         )
         val plugin = testPlugin(
@@ -981,7 +981,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
             initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
         )
@@ -1022,7 +1022,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
             initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
         )
@@ -1057,7 +1057,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
             failingLiveBatches = setOf(listOf(123L)),
         )
@@ -1085,7 +1085,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
             initialLiveSnapshots = mapOf(
                 101L to liveSnapshot(LiveStatus.OPEN, startedAt, userId = "101", roomId = "501"),
@@ -1136,7 +1136,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
         )
         val plugin = testPlugin(
@@ -1159,7 +1159,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
             initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
         )
@@ -1181,7 +1181,7 @@ class BilibiliPublisherPluginTest {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
             initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
         )
@@ -1334,7 +1334,7 @@ class BilibiliPublisherPluginTest {
         return FakeGateway(
             snapshot = snapshot,
             followState = FollowState.FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FOLLOWED),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
             dynamicDetails = dynamicDetails,
             shortUrlExpansions = shortUrlExpansions,
             videoSnapshots = videoSnapshots,
@@ -1426,7 +1426,7 @@ class BilibiliPublisherPluginTest {
         private val followRelation: BilibiliFollowRelationSnapshot? = null,
         private val relationFailure: Throwable? = null,
         private val unfollowActionResult: FollowActionResult = FollowActionResult(
-            FollowActionStatus.FOLLOWED,
+            FollowActionStatus.DONE,
             "unfollowed",
         ),
         initialDynamicPages: Map<Int, BiliDynamicList> = emptyMap(),

@@ -51,6 +51,9 @@ import top.colter.bilibili.data.user.BiliUserInfo
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 internal data class BilibiliPublisherSnapshot(
     val userId: String,
@@ -412,7 +415,7 @@ internal class BilibiliPollService(
 
     override suspend fun followPublisher(userId: String): FollowActionResult {
         return when (queryFollowState(userId)) {
-            FollowState.FOLLOWING -> FollowActionResult(FollowActionStatus.ALREADY_FOLLOWING)
+            FollowState.FOLLOWING -> FollowActionResult(FollowActionStatus.NOOP)
             FollowState.UNSUPPORTED -> FollowActionResult(FollowActionStatus.UNSUPPORTED)
             FollowState.NOT_FOLLOWING -> {
                 val uid = userId.toLongOrNull()
@@ -422,7 +425,7 @@ internal class BilibiliPollService(
                     )
                 client.follow(uid)
                 applyRequestDelay()
-                FollowActionResult(FollowActionStatus.FOLLOWED)
+                FollowActionResult(FollowActionStatus.DONE)
             }
         }
     }
@@ -436,7 +439,7 @@ internal class BilibiliPollService(
         client.unfollow(uid)
         applyRequestDelay()
         return FollowActionResult(
-            FollowActionStatus.FOLLOWED,
+            FollowActionStatus.DONE,
             "已取消关注 Bilibili 用户：$userId",
         )
     }
@@ -753,7 +756,16 @@ private fun String?.toNormalizedBiliImageUrl(): String? {
     }
 }
 
-private fun String?.parseLiveStartEpochSeconds(): Long? {
+internal fun String?.parseLiveStartEpochSeconds(): Long? {
     val value = this?.trim()?.takeIf { it.isNotBlank() && it != "0000-00-00 00:00:00" } ?: return null
     return value.toLongOrNull()
+        ?: runCatching {
+            LocalDateTime
+                .parse(value, BILI_LIVE_TIME_FORMATTER)
+                .atZone(BILI_TIME_ZONE)
+                .toEpochSecond()
+        }.getOrNull()
 }
+
+private val BILI_TIME_ZONE: ZoneId = ZoneId.of("Asia/Shanghai")
+private val BILI_LIVE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")

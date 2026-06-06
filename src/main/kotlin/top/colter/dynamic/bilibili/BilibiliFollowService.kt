@@ -42,7 +42,7 @@ internal class BilibiliFollowService(
                 error.message ?: "Bilibili 关注失败",
             )
         }
-        if (result.status == FollowActionStatus.FOLLOWED || result.status == FollowActionStatus.ALREADY_FOLLOWING) {
+        if (result.status == FollowActionStatus.DONE || result.status == FollowActionStatus.NOOP) {
             addPublisherToFollowGroup(userId)
         }
         return result
@@ -72,7 +72,7 @@ internal class BilibiliFollowService(
             )
         }
 
-        if (result.status == FollowActionStatus.FOLLOWED) {
+        if (result.status == FollowActionStatus.DONE) {
             followLogger.info {
                 "Bilibili 自动取消关注完成：uid=$userId，groupId=$groupId"
             }
@@ -178,7 +178,7 @@ internal class BilibiliFollowService(
             "Bilibili 自动取消关注已跳过：uid=$userId，原因=$reason"
         }
         return FollowActionResult(
-            FollowActionStatus.FAILED,
+            FollowActionStatus.NOOP,
             "已跳过自动取消关注：$reason",
         )
     }
