@@ -4,6 +4,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import top.colter.bilibili.api.downloadVideo
 import top.colter.bilibili.api.follow
 import top.colter.bilibili.api.getCurrentUserNav
 import top.colter.bilibili.api.getDynamicDetail
@@ -26,7 +27,13 @@ import top.colter.bilibili.data.login.QrCodeLoginResult
 import top.colter.bilibili.data.login.QrCodeLoginStatus
 import top.colter.bilibili.data.user.BiliGroup
 import top.colter.bilibili.data.video.BiliVideo
+import top.colter.bilibili.data.video.BiliVideoDownloadResult
+import top.colter.bilibili.data.video.BiliVideoQuality as BiliClientVideoQuality
+import top.colter.bilibili.exception.BiliDownloadException
 import top.colter.bilibili.exception.BiliLoginException
+import top.colter.dynamic.core.link.LinkVideoDownloadRequest
+import top.colter.dynamic.core.link.LinkVideoDownloadResult
+import top.colter.dynamic.core.link.LinkVideoQuality
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
@@ -41,6 +48,7 @@ import kotlinx.coroutines.CancellationException
 import top.colter.bilibili.api.relation
 import top.colter.bilibili.api.unfollow
 import top.colter.bilibili.data.user.BiliUserInfo
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
 
@@ -97,6 +105,10 @@ internal data class BilibiliFollowRelationSnapshot(
     val tagIds: Set<Long>,
 )
 
+private class BilibiliVideoDownloadSizeExceededException(
+    maxBytes: Long,
+) : BiliDownloadException("视频下载超过大小上限：maxBytes=$maxBytes")
+
 internal interface BilibiliPlatformGateway {
     suspend fun fetchNewDynamicPage(page: Int = 1, type: String = "all"): BiliDynamicList {
         throw UnsupportedOperationException("不支持拉取动态列表")
@@ -114,6 +126,10 @@ internal interface BilibiliPlatformGateway {
 
     suspend fun fetchVideoSnapshot(videoId: String): BilibiliVideoSnapshot? {
         throw UnsupportedOperationException("不支持获取视频详情")
+    }
+
+    suspend fun downloadVideoLink(request: LinkVideoDownloadRequest): LinkVideoDownloadResult {
+        throw UnsupportedOperationException("不支持视频下载")
     }
 
     suspend fun fetchLiveRoomSnapshot(roomId: String): BilibiliLiveRoomSnapshot? {
@@ -260,6 +276,69 @@ internal class BilibiliPollService(
         val video = client.getVideoDetail(aid = aid, bvid = bvid)
         applyRequestDelay()
         return video.toSnapshot()
+    }
+
+    override suspend fun downloadVideoLink(request: LinkVideoDownloadRequest): LinkVideoDownloadResult {
+        val normalized = request.parsedLink.targetId.trim()
+        require(normalized.isNotBlank()) { "视频 ID 不能为空" }
+        require(request.maxBytes > 0) { "视频大小上限必须大于 0" }
+
+        val aid = normalized.removePrefix("av").removePrefix("AV").toLongOrNull()
+        val bvid = normalized.takeIf { it.startsWith("BV", ignoreCase = true) }
+        require(aid != null || !bvid.isNullOrBlank()) { "不支持的 Bilibili 视频 ID：$normalized" }
+
+        val directory = request.directory
+        val fileName = normalized.toVideoCacheFileName()
+        val cachedFile = directory.resolve("$fileName.mp4")
+        if (cachedFile.isFile) {
+            val cachedSize = cachedFile.length()
+            if (cachedSize <= request.maxBytes) {
+                return LinkVideoDownloadResult(
+                    video = MediaRef(cachedFile.absolutePath, MediaKind.VIDEO, mimeType = "video/mp4"),
+                    fileSizeBytes = cachedSize,
+                )
+            }
+            cachedFile.delete()
+        }
+
+        cleanupVideoCacheFiles(directory, fileName)
+        return try {
+            val detail = client.getVideoDetail(aid = aid, bvid = bvid)
+            val result = client.downloadVideo(
+                directory = directory,
+                aid = detail.aid,
+                bvid = detail.bvid,
+                fileName = fileName,
+                ffmpegPath = request.ffmpegPath.trim().takeIf { it.isNotBlank() },
+                overwrite = true,
+                keepStreams = false,
+                quality = request.quality.toBiliClientQuality(),
+                onProgress = {
+                    if (directory.cacheBytes(fileName) > request.maxBytes) {
+                        throw BilibiliVideoDownloadSizeExceededException(request.maxBytes)
+                    }
+                },
+            )
+            val finalFile = result.finalMp4File()
+            val size = finalFile.length()
+            if (size > request.maxBytes) {
+                throw BilibiliVideoDownloadSizeExceededException(request.maxBytes)
+            }
+            LinkVideoDownloadResult(
+                video = MediaRef(finalFile.absolutePath, MediaKind.VIDEO, mimeType = "video/mp4"),
+                fileSizeBytes = size,
+                title = detail.title,
+                durationSeconds = detail.duration.takeIf { it > 0 }?.toLong(),
+            )
+        } catch (e: CancellationException) {
+            cleanupVideoCacheFiles(directory, fileName)
+            throw e
+        } catch (e: Throwable) {
+            cleanupVideoCacheFiles(directory, fileName)
+            throw e
+        } finally {
+            applyRequestDelay()
+        }
     }
 
     override suspend fun fetchLiveRoomSnapshot(roomId: String): BilibiliLiveRoomSnapshot? {
@@ -476,6 +555,48 @@ internal class BilibiliPollService(
             durationSeconds = duration.takeIf { it > 0 }?.toLong(),
             publishedAtEpochSeconds = pubTime.takeIf { it > 0 },
         )
+    }
+
+    private fun BiliVideoDownloadResult.finalMp4File(): File {
+        return listOfNotNull(finalFile, durlFiles.singleOrNull())
+            .firstOrNull { it.isFile && it.extension.equals("mp4", ignoreCase = true) }
+            ?: throw BiliDownloadException("视频下载未得到可发送的 mp4 文件，请配置 ffmpeg 后重试")
+    }
+
+    private fun LinkVideoQuality.toBiliClientQuality(): BiliClientVideoQuality {
+        return when (this) {
+            LinkVideoQuality.AUTO_LOWEST -> BiliClientVideoQuality.AUTO_LOWEST
+            LinkVideoQuality.P240 -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P240)
+            LinkVideoQuality.P360 -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P360)
+            LinkVideoQuality.P480 -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P480)
+            LinkVideoQuality.P720 -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P720)
+            LinkVideoQuality.P1080 -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P1080)
+            LinkVideoQuality.AUTO_HIGHEST -> BiliClientVideoQuality.AUTO_HIGHEST
+        }
+    }
+
+    private fun String.toVideoCacheFileName(): String {
+        return replace(Regex("[^a-zA-Z0-9._-]+"), "_")
+            .trim('_', '.', ' ')
+            .ifBlank { "video" }
+    }
+
+    private fun File.cacheBytes(fileName: String): Long {
+        return cacheFiles(fileName).sumOf { file -> if (file.isFile) file.length() else 0L }
+    }
+
+    private fun cleanupVideoCacheFiles(directory: File, fileName: String) {
+        directory.cacheFiles(fileName).forEach { file ->
+            runCatching { file.delete() }
+        }
+    }
+
+    private fun File.cacheFiles(fileName: String): List<File> {
+        return listFiles()
+            ?.filter { file ->
+                file.isFile && (file.name == "$fileName.mp4" || file.name.startsWith("$fileName."))
+            }
+            .orEmpty()
     }
 
     private suspend fun importAndVerifyCookies(importer: suspend () -> Unit): PublisherLoginResult {

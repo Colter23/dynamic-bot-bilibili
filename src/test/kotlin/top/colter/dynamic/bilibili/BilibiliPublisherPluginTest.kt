@@ -291,6 +291,7 @@ class BilibiliPublisherPluginTest {
                     ownerId = "42",
                     ownerName = "demo-up",
                     ownerFaceUrl = "https://example.com/owner-face.png",
+                    durationSeconds = 120,
                     play = 12_345,
                     danmaku = 234,
                     like = 56,
@@ -308,6 +309,7 @@ class BilibiliPublisherPluginTest {
         assertEquals("demo video", resolution.preview.title)
         assertEquals("视频", resolution.preview.badge)
         assertEquals("42", resolution.preview.publisher?.externalId)
+        assertEquals(120, resolution.preview.durationSeconds)
         assertEquals(listOf("play", "danmaku", "like"), resolution.preview.metrics.map { it.key })
         assertEquals(listOf("BV1xx411c7mD"), gateway.requestedVideos)
     }

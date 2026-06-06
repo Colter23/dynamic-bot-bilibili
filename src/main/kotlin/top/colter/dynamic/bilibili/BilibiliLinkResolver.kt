@@ -119,6 +119,7 @@ internal class BilibiliLinkResolver(
                     snapshot.danmaku.toDisplayMetric("danmaku"),
                     snapshot.like.toDisplayMetric("like"),
                 ),
+                durationSeconds = snapshot.durationSeconds,
             ),
         )
     }

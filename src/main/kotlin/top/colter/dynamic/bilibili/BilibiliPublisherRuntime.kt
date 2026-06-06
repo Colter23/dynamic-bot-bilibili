@@ -37,6 +37,9 @@ import top.colter.dynamic.core.event.SubscriptionChangedEvent
 import top.colter.dynamic.core.event.SubscriptionChangeType
 import top.colter.dynamic.core.link.LinkResolution
 import top.colter.dynamic.core.link.LinkResolver
+import top.colter.dynamic.core.link.LinkVideoDownloadRequest
+import top.colter.dynamic.core.link.LinkVideoDownloadResult
+import top.colter.dynamic.core.link.LinkVideoDownloader
 import top.colter.dynamic.core.link.ParsedLink
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowState
@@ -65,6 +68,7 @@ internal class BilibiliPublisherRuntime() :
     PublisherFollowPlugin,
     PublisherLoginProvider,
     LinkResolver,
+    LinkVideoDownloader,
     ConfigurablePlugin<BilibiliPublisherConfig> {
     private var pluginId: String = "bilibili-publisher"
     private val detectTaskId: String = "bilibili-detect"
@@ -327,6 +331,12 @@ internal class BilibiliPublisherRuntime() :
 
     override suspend fun resolveLink(parsedLink: ParsedLink): LinkResolution {
         return linkResolver.resolveLink(parsedLink)
+    }
+
+    override suspend fun downloadVideoLink(request: LinkVideoDownloadRequest): LinkVideoDownloadResult {
+        return requestFailureHandler.run("视频下载 id=${request.parsedLink.targetId}") {
+            pollService.downloadVideoLink(request)
+        }.getOrThrow()
     }
 
     override suspend fun loginByCookie(cookie: String): PublisherLoginResult {
