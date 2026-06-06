@@ -130,6 +130,10 @@ public class BilibiliPublisherPlugin private constructor(
         runtime.onSubscriptionChanged(event)
     }
 
+    override fun matchesLink(inputUrl: String): Boolean {
+        return runtime.matchesLink(inputUrl)
+    }
+
     override suspend fun parseLink(inputUrl: String): ParsedLink? {
         return runtime.parseLink(inputUrl)
     }

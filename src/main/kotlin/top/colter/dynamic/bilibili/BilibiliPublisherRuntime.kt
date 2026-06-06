@@ -325,6 +325,10 @@ internal class BilibiliPublisherRuntime() :
         }
     }
 
+    override fun matchesLink(inputUrl: String): Boolean {
+        return linkResolver.matchesLink(inputUrl)
+    }
+
     override suspend fun parseLink(inputUrl: String): ParsedLink? {
         return linkResolver.parseLink(inputUrl)
     }

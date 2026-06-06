@@ -31,6 +31,12 @@ internal class BilibiliLinkResolver(
     private val gateway: BilibiliPlatformGateway
         get() = gatewayProvider()
 
+    fun matchesLink(inputUrl: String): Boolean {
+        val normalizedInput = inputUrl.trim().trimUrlPunctuation()
+        if (normalizedInput.isBlank()) return false
+        return parseDirectLink(normalizedInput) != null || isBilibiliShortUrl(normalizedInput)
+    }
+
     suspend fun parseLink(inputUrl: String): ParsedLink? {
         val normalizedInput = inputUrl.trim().trimUrlPunctuation()
         if (normalizedInput.isBlank()) return null
