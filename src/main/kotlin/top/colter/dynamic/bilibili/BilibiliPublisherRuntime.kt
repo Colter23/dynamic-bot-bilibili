@@ -190,6 +190,8 @@ internal class BilibiliPublisherRuntime() :
         liveStatusStore = liveStatusStoreFactory()
         detectTask = TaskDefinition(
             id = detectTaskId,
+            name = "Bilibili 动态检测",
+            description = "按配置间隔检测已订阅发布者的新动态、开播和下播事件，并发布到主项目。",
             schedule = TaskSchedule.FixedDelay(config.pollingIntervalSeconds.seconds, runImmediately = true),
             action = {
                 detectAndPublish()

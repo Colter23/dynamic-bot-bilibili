@@ -1920,6 +1920,11 @@ class BilibiliPublisherPluginTest {
             return true
         }
 
+        override fun start(id: String): Boolean {
+            val definition = tasks[id]?.definition ?: return false
+            return start(definition)
+        }
+
         override suspend fun stop(id: String): Boolean {
             val runtime = tasks[id] ?: return false
             val job = runtime.job ?: return false
@@ -1927,6 +1932,12 @@ class BilibiliPublisherPluginTest {
             job.cancelAndJoin()
             runtime.status = TaskStatus.CANCELLED
             return true
+        }
+
+        override suspend fun restart(id: String): Boolean {
+            val definition = tasks[id]?.definition ?: return false
+            stop(id)
+            return start(definition)
         }
 
         override suspend fun stopAll() {
@@ -1990,7 +2001,11 @@ class BilibiliPublisherPluginTest {
 
             fun snapshot(): TaskSnapshot = TaskSnapshot(
                 id = definition.id,
+                name = definition.name,
+                description = definition.description,
                 status = status,
+                schedule = definition.schedule,
+                retryBackoffMillis = definition.retryBackoff.inWholeMilliseconds,
                 nextRunAtMillis = nextRunAtMillis,
                 lastRunAtMillis = lastRunAtMillis,
                 lastSuccessAtMillis = lastSuccessAtMillis,
