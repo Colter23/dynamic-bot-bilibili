@@ -160,6 +160,8 @@ internal class BilibiliLinkResolver(
                     snapshot.online.toDisplayMetric("online"),
                     snapshot.attention.toDisplayMetric("follow"),
                 ),
+                liveStatus = snapshot.status,
+                liveStartedAtEpochSeconds = snapshot.startedAtEpochSeconds,
             ),
         )
     }
