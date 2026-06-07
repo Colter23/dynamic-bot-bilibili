@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.3.21"
+    kotlin("jvm") version "2.4.0"
 }
 
 apply(from = "gradle/dynamic-plugin-fatjar.gradle.kts")
@@ -13,13 +13,14 @@ repositories {
 }
 
 dependencies {
+    val coroutinesVersion = "1.11.0"
     val coreVersion = "0.0.6"
-    val kotlinLoggingVersion = "7.0.0"
+    val kotlinLoggingVersion = "8.0.4"
 
     implementation("top.colter.bilibili:bilibili-client:0.0.1")
 
     compileOnly("top.colter.dynamic:dynamic-bot-core:$coreVersion")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
     compileOnly("io.github.oshai:kotlin-logging-jvm:$kotlinLoggingVersion")
 
     testImplementation(kotlin("test"))
@@ -31,6 +32,15 @@ tasks.test {
     useJUnitPlatform()
 }
 
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
 kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        freeCompilerArgs.add("-Xjdk-release=17")
+    }
     jvmToolchain(21)
 }

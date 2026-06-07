@@ -12,6 +12,10 @@ tasks.register<Jar>("fatJar") {
     archiveClassifier.set("all")
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
+    manifest {
+        attributes["Multi-Release"] = "true"
+    }
+
     from(pluginSourceSets.named("main").map { it.output })
     dependsOn(pluginRuntimeClasspath)
     from({
