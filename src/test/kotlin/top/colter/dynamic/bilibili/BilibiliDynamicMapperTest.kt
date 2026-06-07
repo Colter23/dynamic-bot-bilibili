@@ -5,7 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
-import top.colter.bilibili.data.LazyImage as BiliLazyImage
+import top.colter.bilibili.data.ImageUrl as BiliImageUrl
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.BiliDynamicModules
 import top.colter.bilibili.data.dynamic.additional.AdditionalCommon
@@ -80,7 +80,7 @@ class BilibiliDynamicMapperTest {
                             text = "[ok]",
                             emoji = RichTextNode.Emoji(
                                 type = 1,
-                                iconUrl = BiliLazyImage("https://example.com/emoji.png"),
+                                iconUrl = BiliImageUrl("https://example.com/emoji.png"),
                                 size = 1,
                                 text = "[ok]",
                             ),
@@ -103,7 +103,7 @@ class BilibiliDynamicMapperTest {
                                 width = 640,
                                 height = 480,
                                 size = 12.5f,
-                                src = BiliLazyImage("https://example.com/pic.png"),
+                                src = BiliImageUrl("https://example.com/pic.png"),
                             ),
                         ),
                     ),
@@ -149,7 +149,7 @@ class BilibiliDynamicMapperTest {
                         description = "article body",
                         label = "100 reads",
                         jumpUrl = "//www.bilibili.com/read/cv7",
-                        covers = listOf(BiliLazyImage("https://example.com/article.png")),
+                        covers = listOf(BiliImageUrl("https://example.com/article.png")),
                     ),
                 ),
             ),
@@ -165,7 +165,7 @@ class BilibiliDynamicMapperTest {
                         aid = 9,
                         bvid = "BV123",
                         title = "video",
-                        cover = BiliLazyImage("https://example.com/video.png"),
+                        cover = BiliImageUrl("https://example.com/video.png"),
                         description = "video body",
                         duration = "01:00",
                         jumpUrl = "//www.bilibili.com/video/BV123",
@@ -178,7 +178,7 @@ class BilibiliDynamicMapperTest {
                     ugc = AdditionalUgc(
                         idStr = "related",
                         title = "related video",
-                        cover = BiliLazyImage("https://example.com/related.png"),
+                        cover = BiliImageUrl("https://example.com/related.png"),
                         descSecond = "related body",
                         duration = "02:00",
                         headText = "related",
@@ -245,7 +245,7 @@ class BilibiliDynamicMapperTest {
                                 width = 640,
                                 height = 360,
                                 size = 23.0,
-                                url = BiliLazyImage("https://example.com/opus.png"),
+                                url = BiliImageUrl("https://example.com/opus.png"),
                             ),
                         ),
                     ),
@@ -275,7 +275,7 @@ class BilibiliDynamicMapperTest {
                     common = AdditionalCommon(
                         idStr = "activity",
                         title = "activity title",
-                        cover = BiliLazyImage(""),
+                        cover = BiliImageUrl(""),
                         subType = "official_activity",
                         desc1 = "activity desc",
                         desc2 = "activity time",
@@ -310,7 +310,7 @@ class BilibiliDynamicMapperTest {
                     ugc = AdditionalUgc(
                         idStr = "ugc",
                         title = "ugc title",
-                        cover = BiliLazyImage(""),
+                        cover = BiliImageUrl(""),
                         descSecond = "ugc desc",
                         duration = "03:21",
                         headText = "相关视频",
@@ -331,7 +331,7 @@ class BilibiliDynamicMapperTest {
                                 id = "goods",
                                 name = "goods title",
                                 brief = "goods brief",
-                                cover = BiliLazyImage(""),
+                                cover = BiliImageUrl(""),
                                 price = "12",
                                 jumpDesc = "去看看",
                                 jumpUrl = "//mall.bilibili.com/goods",
@@ -403,7 +403,7 @@ class BilibiliDynamicMapperTest {
                         description = "article body",
                         label = "100 reads",
                         jumpUrl = "//www.bilibili.com/read/cv251",
-                        covers = listOf(BiliLazyImage("")),
+                        covers = listOf(BiliImageUrl("")),
                     ),
                 ),
             ),
@@ -429,7 +429,7 @@ class BilibiliDynamicMapperTest {
                         aid = 10,
                         bvid = "BV999",
                         title = "origin video",
-                        cover = BiliLazyImage("https://example.com/origin-video.png"),
+                        cover = BiliImageUrl("https://example.com/origin-video.png"),
                         description = "origin body",
                         duration = "03:21",
                         jumpUrl = "//www.bilibili.com/video/BV999",
@@ -567,7 +567,7 @@ class BilibiliDynamicMapperTest {
         return ModuleAuthor(
             mid = mid,
             name = name,
-            face = BiliLazyImage("https://example.com/$mid-face.png"),
+            face = BiliImageUrl("https://example.com/$mid-face.png"),
             official = official,
             pubTs = 123,
         )

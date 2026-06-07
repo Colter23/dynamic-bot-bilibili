@@ -2,6 +2,8 @@ plugins {
     kotlin("jvm") version "2.3.21"
 }
 
+apply(from = "gradle/dynamic-plugin-fatjar.gradle.kts")
+
 group = "top.colter.dynamic"
 version = "0.0.1"
 
@@ -11,46 +13,22 @@ repositories {
 }
 
 dependencies {
+    val coreVersion = "0.0.6"
+    val kotlinLoggingVersion = "7.0.0"
+
     implementation("top.colter.bilibili:bilibili-client:0.0.1")
 
-    implementation("top.colter.dynamic:dynamic-bot-core:0.0.6")
+    compileOnly("top.colter.dynamic:dynamic-bot-core:$coreVersion")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
-    implementation("io.github.oshai:kotlin-logging-jvm:7.0.0")
+    compileOnly("io.github.oshai:kotlin-logging-jvm:$kotlinLoggingVersion")
 
     testImplementation(kotlin("test"))
+    testImplementation("top.colter.dynamic:dynamic-bot-core:$coreVersion")
+    testImplementation("io.github.oshai:kotlin-logging-jvm:$kotlinLoggingVersion")
 }
 
 tasks.test {
     useJUnitPlatform()
-}
-
-tasks.register<Jar>("fatJar") {
-    group = "build"
-    description = "Builds an executable fat jar with runtime dependencies."
-    archiveClassifier.set("all")
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-
-    from(sourceSets.main.get().output)
-    dependsOn(configurations.runtimeClasspath)
-    from({
-        configurations.runtimeClasspath.get().filter { it.exists() && !it.isHostProvidedByDynamicBot() }.map { file ->
-            if (file.isDirectory) file else zipTree(file)
-        }
-    })
-}
-
-fun File.isHostProvidedByDynamicBot(): Boolean {
-    val normalizedPath = path.replace('\\', '/')
-    return normalizedPath.contains("/dynamic-bot-core/build/") ||
-        name.startsWith("dynamic-bot-core-") ||
-        name.startsWith("kotlin-logging-jvm-") ||
-        name.startsWith("log4j-api-") ||
-        name.startsWith("log4j-core-") ||
-        name.startsWith("log4j-slf4j") ||
-        name.startsWith("log4j-to-slf4j-") ||
-        name.startsWith("logback-") ||
-        name.startsWith("jul-to-slf4j-") ||
-        name.startsWith("slf4j-")
 }
 
 kotlin {

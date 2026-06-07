@@ -1,6 +1,6 @@
 package top.colter.dynamic.bilibili
 
-import top.colter.bilibili.data.LazyImage as BiliLazyImage
+import top.colter.bilibili.data.ImageUrl as BiliImageUrl
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.additional.AdditionalCommon
 import top.colter.bilibili.data.dynamic.additional.AdditionalGoods
@@ -638,7 +638,7 @@ internal class BilibiliDynamicMapper {
         return modules.author.pubTs.takeIf { it > 0 } ?: time
     }
 
-    private fun BiliLazyImage.toCoreImageOrNull(kind: MediaKind = MediaKind.IMAGE): MediaRef? {
+    private fun BiliImageUrl.toCoreImageOrNull(kind: MediaKind = MediaKind.IMAGE): MediaRef? {
         return url.toNormalizedUrlOrNull()?.let { MediaRef(uri = it, kind = kind) }
     }
 

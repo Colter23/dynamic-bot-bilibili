@@ -12,7 +12,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
-import top.colter.bilibili.data.LazyImage as BiliLazyImage
+import top.colter.bilibili.data.ImageUrl as BiliImageUrl
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.BiliDynamicList
 import top.colter.bilibili.data.dynamic.BiliDynamicModules
@@ -1230,7 +1230,7 @@ class BilibiliPublisherPluginTest {
                 BiliUserInfo(
                     mid = 123L,
                     name = "demo",
-                    face = BiliLazyImage("https://example.com/face.png"),
+                    face = BiliImageUrl("https://example.com/face.png"),
                     official = null,
                     pendant = null,
                     vip = null,
@@ -1375,7 +1375,7 @@ class BilibiliPublisherPluginTest {
         val author = ModuleAuthor(
             mid = mid,
             name = name,
-            face = BiliLazyImage("https://example.com/$mid.png"),
+            face = BiliImageUrl("https://example.com/$mid.png"),
         )
         return BiliDynamic(
             originType = OriginDynamicType.WORD,
