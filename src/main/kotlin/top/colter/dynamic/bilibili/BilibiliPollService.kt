@@ -576,7 +576,14 @@ internal class BilibiliPollService(
             LinkVideoQuality.P360 -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P360)
             LinkVideoQuality.P480 -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P480)
             LinkVideoQuality.P720 -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P720)
+            LinkVideoQuality.P720_60 -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P720_60)
             LinkVideoQuality.P1080 -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P1080)
+            LinkVideoQuality.P1080_PLUS -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P1080_PLUS)
+            LinkVideoQuality.P1080_60 -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P1080_60)
+            LinkVideoQuality.P4K -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P4K)
+            LinkVideoQuality.HDR -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.HDR)
+            LinkVideoQuality.DOLBY -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.DOLBY)
+            LinkVideoQuality.P8K -> BiliClientVideoQuality.atMost(BiliClientVideoQuality.P8K)
             LinkVideoQuality.AUTO_HIGHEST -> BiliClientVideoQuality.AUTO_HIGHEST
         }
     }
