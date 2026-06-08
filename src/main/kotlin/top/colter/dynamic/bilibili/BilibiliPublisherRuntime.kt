@@ -200,7 +200,9 @@ internal class BilibiliPublisherRuntime() :
 
         importStoredCookies()
         loadActivePublishers()
-        logger.info { "Bilibili 配置已加载：pluginId=$pluginId" }
+        logger.info {
+            "Bilibili 配置已加载：pluginId=$pluginId，直播检测=${if (config.liveDetectionEnabled) "启用" else "关闭"}"
+        }
     }
 
     override suspend fun onStart() {
