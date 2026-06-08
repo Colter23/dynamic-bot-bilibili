@@ -67,16 +67,6 @@ public object BilibiliPublisherConfigForm {
                 min = 0,
             ),
             ConfigFieldSpec(
-                path = "cookiesJson",
-                label = "登录 Cookie（JSON）",
-                type = ConfigFieldType.SECRET,
-                section = "登录",
-                description = "Bilibili 登录 Cookie 的 JSON 内容，通常由后台扫码或 Cookie 登录流程自动保存。",
-                secret = true,
-                restartRequired = true,
-                restartTarget = "Bilibili 插件",
-            ),
-            ConfigFieldSpec(
                 path = "liveDetectionEnabled",
                 label = "直播检测",
                 type = ConfigFieldType.BOOLEAN,
