@@ -1018,6 +1018,43 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `subscription update should enable live status baseline`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
+        )
+        val liveStore = InMemoryLiveStatusStore()
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(pollingIntervalSeconds = 30.0),
+            liveStatusStore = liveStore,
+        )
+        val sourceUpdates = RecordingSourceUpdatePublisher()
+        val seeded = seedPublisherAndSubscriber(policy = SubscriptionPolicy.default())
+
+        plugin.init(sourceUpdates)
+        plugin.start()
+        assertNull(liveStore.get(seeded.publisher.id))
+
+        val updatedSubscription = TestSubscriptions.updatePolicy(seeded.subscription, livePolicy())
+        plugin.onSubscriptionChanged(
+            SubscriptionChangedEvent(
+                changeType = SubscriptionChangeType.UPDATED,
+                subscription = updatedSubscription,
+                publisher = seeded.publisher,
+                subscriber = seeded.subscriber,
+                changedAtEpochSeconds = updatedSubscription.updatedAtEpochSeconds,
+            )
+        )
+
+        assertEquals(LiveStatus.CLOSE, liveStore.get(seeded.publisher.id)?.status)
+        plugin.stop()
+    }
+
+    @Test
     fun `live polling should not emit close and round transitions`() = runBlocking {
         val gateway = FakeGateway(
             snapshot = null,
@@ -1868,6 +1905,15 @@ class BilibiliPublisherPluginTest {
             )
             subscriptions[key] = subscription
             return subscription
+        }
+
+        fun updatePolicy(subscription: Subscription, policy: SubscriptionPolicy): Subscription {
+            val updated = subscription.copy(
+                policy = policy,
+                updatedAtEpochSeconds = System.currentTimeMillis() / 1000,
+            )
+            subscriptions[subscription.subscriberId to subscription.publisherId] = updated
+            return updated
         }
 
         override fun findActivePublisherWithSubscribersById(publisherId: Int): PublisherSubscribers? {

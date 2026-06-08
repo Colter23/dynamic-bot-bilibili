@@ -323,6 +323,7 @@ internal class BilibiliPublisherRuntime() :
 
         when (event.changeType) {
             SubscriptionChangeType.SUBSCRIBED -> handleSubscribed(event)
+            SubscriptionChangeType.UPDATED -> handleSubscribed(event)
             SubscriptionChangeType.UNSUBSCRIBED -> handleUnsubscribed(event)
         }
     }
