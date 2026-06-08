@@ -30,6 +30,7 @@ import top.colter.bilibili.data.dynamic.type.RichTextType
 import top.colter.dynamic.core.data.DynamicBlock
 import top.colter.dynamic.core.data.DynamicBlockRole
 import top.colter.dynamic.core.data.DynamicContent
+import top.colter.dynamic.core.data.DynamicContentIcon
 import top.colter.dynamic.core.data.DynamicContentNode
 import top.colter.dynamic.core.data.DynamicContentNodeEmoji
 import top.colter.dynamic.core.data.DynamicContentNodeLink
@@ -63,6 +64,7 @@ import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.data.SourceUpdate
 import top.colter.dynamic.core.data.TextBlock
 import top.colter.dynamic.core.data.UpdateKey
+import top.colter.dynamic.core.plugin.PlatformDrawAssetKeys
 
 internal class BilibiliDynamicMapper {
     fun map(source: BiliDynamic, fallbackPublisher: Publisher): SourceUpdate? {
@@ -155,6 +157,7 @@ internal class BilibiliDynamicMapper {
             val topicText = topic.name.takeIfNotBlank() ?: return@let null
             DynamicContentNodeTag(
                 text = topicText.ensureTopicText(),
+                icon = contentIcon(PlatformDrawAssetKeys.ContentIcon.TOPIC, "话题"),
                 tagType = DynamicContentTagType.TOPIC,
                 externalId = topic.id.takeIf { it > 0 }?.toString(),
                 url = topic.jumpUrl.toNormalizedUrlOrNull(),
@@ -197,24 +200,42 @@ internal class BilibiliDynamicMapper {
             )
             RichTextType.BV -> DynamicContentNodeLink(
                 text = displayText,
+                icon = contentIcon(PlatformDrawAssetKeys.ContentIcon.VIDEO, "视频"),
                 url = jumpUrl.toNormalizedUrlOrNull() ?: displayText
                     .takeIf { it.startsWith("BV", ignoreCase = true) }
                     ?.let { "$BILIBILI_HOME/video/$it" },
             )
             RichTextType.TOPIC -> DynamicContentNodeTag(
                 text = displayText,
+                icon = contentIcon(PlatformDrawAssetKeys.ContentIcon.TOPIC, "话题"),
                 tagType = DynamicContentTagType.TOPIC,
                 externalId = rid,
                 url = jumpUrl.toNormalizedUrlOrNull(),
             )
-            RichTextType.WEB,
-            RichTextType.VOTE,
+            RichTextType.WEB -> DynamicContentNodeLink(
+                text = displayText,
+                icon = contentIcon(PlatformDrawAssetKeys.ContentIcon.LINK, "链接"),
+                url = jumpUrl.toNormalizedUrlOrNull(),
+            )
+            RichTextType.VOTE -> DynamicContentNodeLink(
+                text = displayText,
+                icon = contentIcon(PlatformDrawAssetKeys.ContentIcon.VOTE, "投票"),
+                url = jumpUrl.toNormalizedUrlOrNull(),
+            )
             RichTextType.GOODS -> DynamicContentNodeLink(
                 text = displayText,
+                icon = contentIcon(PlatformDrawAssetKeys.ContentIcon.GOODS, "商品"),
                 url = jumpUrl.toNormalizedUrlOrNull(),
             )
             RichTextType.UNKNOWN -> jumpUrl.toNormalizedUrlOrNull()
-                ?.let { DynamicContentNodeLink(text = displayText, url = it) }
+                ?.let {
+                    val icon = unknownContentIcon()
+                    DynamicContentNodeLink(
+                        text = displayText,
+                        icon = icon,
+                        url = it,
+                    )
+                }
                 ?: DynamicContentNodeText(displayText)
         }
     }
@@ -247,21 +268,25 @@ internal class BilibiliDynamicMapper {
     }
 
     private fun MajorDrawItem.toImageItem(): ImageItem? {
+        val image = src.toCoreImageOrNull(MediaKind.IMAGE) ?: return null
         return ImageItem(
-            image = src.toCoreImageOrNull(MediaKind.IMAGE) ?: return null,
+            image = image,
             width = width,
             height = height,
             sizeBytes = size.toLong(),
-            badge = tags?.firstNotNullOfOrNull { it.text.takeIfNotBlank() },
+            badge = tags?.firstNotNullOfOrNull { it.text.takeIfNotBlank() }
+                ?: image.inferImageBadge(width, height),
         )
     }
 
     private fun MajorOpusPic.toImageItem(): ImageItem? {
+        val image = url.toCoreImageOrNull(MediaKind.IMAGE) ?: return null
         return ImageItem(
-            image = url.toCoreImageOrNull(MediaKind.IMAGE) ?: return null,
+            image = image,
             width = width,
             height = height,
             sizeBytes = size?.toLong(),
+            badge = image.inferImageBadge(width, height),
         )
     }
 
@@ -642,6 +667,19 @@ internal class BilibiliDynamicMapper {
         return url.toNormalizedUrlOrNull()?.let { MediaRef(uri = it, kind = kind) }
     }
 
+    private fun MediaRef.inferImageBadge(width: Int?, height: Int?): String? {
+        return when {
+            uri.isGifImageUrl() -> "动图"
+            width != null && height != null && width > 0 && height > width * 2 -> "长图"
+            else -> null
+        }
+    }
+
+    private fun String.isGifImageUrl(): Boolean {
+        val path = substringBefore('?').substringBefore('#')
+        return path.endsWith(".gif", ignoreCase = true)
+    }
+
     private fun String?.toDurationSeconds(): Long? {
         val parts = this?.split(':')
             ?.mapNotNull { it.trim().toLongOrNull() }
@@ -658,6 +696,22 @@ internal class BilibiliDynamicMapper {
         return jumpStyle?.text.takeIfNotBlank()
             ?: check?.text.takeIfNotBlank()
             ?: uncheck?.text.takeIfNotBlank()
+    }
+
+    private fun contentIcon(assetKey: String, alt: String): DynamicContentIcon {
+        return DynamicContentIcon(
+            platformId = BILIBILI_PLATFORM.id,
+            assetKey = assetKey,
+            alt = alt,
+        )
+    }
+
+    private fun RichTextNode.unknownContentIcon(): DynamicContentIcon {
+        return when {
+            type.info.endsWith("LOTTERY") -> contentIcon(PlatformDrawAssetKeys.ContentIcon.LOTTERY, "抽奖")
+            type.info.endsWith("DISPUTE") -> contentIcon(PlatformDrawAssetKeys.ContentIcon.DISPUTE, "争议")
+            else -> contentIcon(PlatformDrawAssetKeys.ContentIcon.LINK, "链接")
+        }
     }
 
     private fun String?.toNormalizedUrlOrNull(): String? {

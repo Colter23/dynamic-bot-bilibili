@@ -31,3 +31,38 @@ drawAssets:
     kind: AVATAR_BADGE
     resourcePath: draw/bilibili/avatar-badge/official-institution.svg
     mimeType: image/svg+xml
+  - platformId: bilibili
+    key: content.icon.video
+    kind: CONTENT_ICON
+    resourcePath: draw/bilibili/icon/VIDEO.svg
+    mimeType: image/svg+xml
+  - platformId: bilibili
+    key: content.icon.link
+    kind: CONTENT_ICON
+    resourcePath: draw/bilibili/icon/LINK.svg
+    mimeType: image/svg+xml
+  - platformId: bilibili
+    key: content.icon.topic
+    kind: CONTENT_ICON
+    resourcePath: draw/bilibili/icon/TOPIC.svg
+    mimeType: image/svg+xml
+  - platformId: bilibili
+    key: content.icon.vote
+    kind: CONTENT_ICON
+    resourcePath: draw/bilibili/icon/VOTE.svg
+    mimeType: image/svg+xml
+  - platformId: bilibili
+    key: content.icon.goods
+    kind: CONTENT_ICON
+    resourcePath: draw/bilibili/icon/GOODS.svg
+    mimeType: image/svg+xml
+  - platformId: bilibili
+    key: content.icon.lottery
+    kind: CONTENT_ICON
+    resourcePath: draw/bilibili/icon/LOTTERY.svg
+    mimeType: image/svg+xml
+  - platformId: bilibili
+    key: content.icon.dispute
+    kind: CONTENT_ICON
+    resourcePath: draw/bilibili/icon/DISPUTE.svg
+    mimeType: image/svg+xml

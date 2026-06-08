@@ -135,6 +135,41 @@ class BilibiliDynamicMapperTest {
     }
 
     @Test
+    fun `map should infer dynamic image badges`() {
+        val source = dynamic(
+            id = "123456790",
+            type = OriginDynamicType.DRAW,
+            dynamic = ModuleDynamic(
+                major = DynamicMajor(
+                    type = MajorType.DRAW,
+                    draw = MajorDraw(
+                        id = 9,
+                        images = listOf(
+                            MajorDrawItem(
+                                width = 400,
+                                height = 901,
+                                size = 12.5f,
+                                src = BiliImageUrl("https://example.com/long.jpg"),
+                            ),
+                            MajorDrawItem(
+                                width = 640,
+                                height = 360,
+                                size = 10f,
+                                src = BiliImageUrl("https://example.com/animated.GIF?x=1"),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val mapped = assertIs<DynamicPayload>(assertNotNull(mapper.map(source, fallbackPublisher())).payload)
+        val imageBlock = mapped.blocks.filterIsInstance<ImageGridBlock>().single()
+
+        assertEquals(listOf("长图", "动图"), imageBlock.images.map { it.badge })
+    }
+
+    @Test
     fun `map should convert cards labels and forwarded origin`() {
         val origin = dynamic(
             id = "100",
