@@ -384,6 +384,7 @@ internal class BilibiliPublisherRuntime() :
                 pendingDetection = false
                 detectAndPublishLocked()
             } while (pendingDetection)
+            persistRuntimeCookiesIfChanged()
         } finally {
             detectMutex.unlock()
         }
@@ -407,10 +408,11 @@ internal class BilibiliPublisherRuntime() :
 
         if (dynamicPublisherSnapshot.isNotEmpty()) {
             val start = System.currentTimeMillis()
-            val followedDynamics = runBilibiliRequest("动态轮询") {
-                pollService.fetchNewDynamicPage(1).items
-            }
-                .getOrElse { emptyList() }
+            // 全局动态流混合了所有关注 UP 主，单页可能放不下突发新动态，需按已有游标下界翻页。
+            val pollLowerBound = dynamicPublisherSnapshot.values
+                .mapNotNull { cursorStore.get(it.id)?.lastSeenAtEpochSeconds }
+                .minOrNull()
+            val followedDynamics = collectPolledDynamics(pollLowerBound)
             val latency = System.currentTimeMillis() - start
             val dynamicsByPublisher = followedDynamics
                 .groupBy { it.mid }
@@ -439,7 +441,7 @@ internal class BilibiliPublisherRuntime() :
                     .asReversed()
                     .forEach dynamicLoop@{ raw ->
                         val dynamicId = raw.id.toString()
-                        if (raw.time <= cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) {
+                        if (raw.time < cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) {
                             return@dynamicLoop
                         }
 
@@ -455,6 +457,35 @@ internal class BilibiliPublisherRuntime() :
         }
         if (requestFailureHandler.isPollingPaused()) return
         detectLiveStatusChanges(livePublisherSnapshot)
+    }
+
+    // 按页拉取全局动态流，直到翻过 lowerBound（已有游标的最早时间）或无更多页/到达页数上限。
+    // lowerBound 为 null（全部发布者均无游标）时只取首页，仅用于初始化游标。
+    private suspend fun collectPolledDynamics(lowerBound: Long?): List<BiliDynamic> {
+        val collected = mutableListOf<BiliDynamic>()
+        var page = 1
+        while (page <= MAX_POLL_PAGES) {
+            val pageFetch = runBilibiliRequest("动态轮询 page=$page") {
+                pollService.fetchNewDynamicPage(page)
+            }
+            if (pageFetch.isFailure) {
+                if (collected.isEmpty()) return emptyList()
+                logger.warn {
+                    "Bilibili 动态轮询分页提前停止：page=$page，已收集=${collected.size} 条；原因=${pageFetch.exceptionOrNull()?.message ?: "未知错误"}"
+                }
+                break
+            }
+            val pageResult = pageFetch.getOrThrow()
+            val items = pageResult.items
+            if (items.isEmpty()) break
+            collected.addAll(items)
+
+            if (lowerBound == null) break
+            val oldestTime = items.minOf { it.time }
+            if (!pageResult.hasMore || oldestTime < lowerBound) break
+            page += 1
+        }
+        return collected
     }
 
     private suspend fun bootstrapLoggedInState(allowReplay: Boolean): Boolean {
@@ -519,7 +550,7 @@ internal class BilibiliPublisherRuntime() :
                 .asReversed()
                 .forEach dynamicLoop@{ raw ->
                     val dynamicId = raw.id.toString()
-                    if (raw.time <= cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) {
+                    if (raw.time < cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) {
                         return@dynamicLoop
                     }
                     cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
@@ -624,7 +655,15 @@ internal class BilibiliPublisherRuntime() :
         previous: PublisherLiveStatus?,
         observedAt: Long,
     ): PublisherLiveStatus {
-        val status = snapshot?.status ?: LiveStatus.CLOSE
+        val rawStatus = snapshot?.status ?: LiveStatus.CLOSE
+        // ROUND（轮播）是过渡态：直播中切轮播不代表下播，仅 CLOSE 才结束直播。
+        // 把 ROUND 归一为"延续上一已解析状态"——直播中→ROUND 视为仍在播，冷启动/已下播→ROUND 视为未播。
+        // 由于存储的 status 始终是 OPEN/CLOSE，可消除 OPEN↔ROUND 抖动产生的虚假开播/下播。
+        val status = when (rawStatus) {
+            LiveStatus.OPEN -> LiveStatus.OPEN
+            LiveStatus.CLOSE -> LiveStatus.CLOSE
+            LiveStatus.ROUND -> if (previous?.status == LiveStatus.OPEN) LiveStatus.OPEN else LiveStatus.CLOSE
+        }
         val roomId = snapshot?.roomId?.takeIf { it.isNotBlank() }
             ?: previous?.roomId
             ?: ""
@@ -768,7 +807,7 @@ internal class BilibiliPublisherRuntime() :
             dynamicsByPublisher[target.userId].orEmpty().forEach dynamicLoop@{ raw ->
                 if (raw.time < target.lowerBound) return@dynamicLoop
                 val dynamicId = raw.id.toString()
-                if (raw.time <= cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) return@dynamicLoop
+                if (raw.time < cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) return@dynamicLoop
 
                 val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
                 logger.debug {
@@ -942,6 +981,22 @@ internal class BilibiliPublisherRuntime() :
         }
     }
 
+    // BiliClient 在轮询期间可能刷新内存 Cookie（wbi/bili_ticket/风控轮换）。
+    // 若不回存，重启后会用过期 Cookie 重新登录。仅在导出值发生变化时写回，避免无谓落盘。
+    private fun persistRuntimeCookiesIfChanged() {
+        if (!::pollService.isInitialized) return
+        val latest = compactJson(pollService.exportCookiesJson())
+        if (latest.isBlank() || latest == "[]") return
+        if (latest == compactJson(config.cookiesJson)) return
+        config = config.copy(cookiesJson = latest)
+        runCatching {
+            saveConfig(pluginId, config)
+        }.onFailure {
+            logger.warn(it) { "回存 Bilibili 运行期 Cookie 失败" }
+        }
+        logger.debug { "Bilibili 运行期 Cookie 已回存配置" }
+    }
+
     private fun compactJson(json: String): String {
         val trimmed = json.trim()
         if (trimmed.isEmpty()) return ""
@@ -1037,6 +1092,7 @@ internal class BilibiliPublisherRuntime() :
     private companion object {
         private const val BILIBILI_HOME: String = "https://www.bilibili.com"
         private const val BILIBILI_LIVE_HOME: String = "https://live.bilibili.com"
+        private const val MAX_POLL_PAGES: Int = 5
         private val BILIBILI_PLATFORM: PlatformDescriptor = PlatformDescriptor.of(
             id = "bilibili",
             displayName = "Bilibili",

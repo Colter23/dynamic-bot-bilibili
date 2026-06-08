@@ -394,7 +394,10 @@ internal class BilibiliPollService(
     }
 
     override suspend fun queryFollowState(userId: String): FollowState {
-        val relation = fetchFollowRelation(userId) ?: return FollowState.UNSUPPORTED
+        // 本网关始终支持关注查询；fetchFollowRelation 返回 null 仅代表 uid 非法（输入错误），
+        // 真正的请求失败会抛异常并由上层 requestFailureHandler 处理。无效 uid 归为 NOT_FOLLOWING，
+        // 让后续关注动作给出"无效的 Bilibili 用户 ID"的精确失败，而不是误判为平台不支持关注。
+        val relation = fetchFollowRelation(userId) ?: return FollowState.NOT_FOLLOWING
         return if (relation.following) {
             FollowState.FOLLOWING
         } else {
