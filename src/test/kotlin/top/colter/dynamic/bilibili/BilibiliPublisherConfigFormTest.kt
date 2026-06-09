@@ -2,20 +2,18 @@ package top.colter.dynamic.bilibili
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class BilibiliPublisherConfigFormTest {
     @Test
-    fun `form should expose cookie secret and polling restart fields`() {
-        val cookieField = BilibiliPublisherConfigForm.spec.fields.single { it.path == "cookiesJson" }
+    fun `form should hide cookie field and expose polling restart fields`() {
         val pollingField = BilibiliPublisherConfigForm.spec.fields.single { it.path == "pollingIntervalSeconds" }
 
-        assertTrue(cookieField.secret)
-        assertTrue(cookieField.restartRequired)
+        assertFalse(BilibiliPublisherConfigForm.spec.fields.any { it.path == "cookiesJson" })
         assertTrue(pollingField.restartRequired)
         assertEquals(1L, pollingField.min)
-        assertTrue(cookieField.description.isNotBlank())
         assertTrue(pollingField.description.contains("秒"))
     }
 

@@ -1237,6 +1237,38 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `stop should close poll service and next start should rebuild it`() {
+        val scheduler = testScheduler()
+        val gateways = mutableListOf<FakeGateway>()
+        TestSubscriptions.reset()
+        TestSourceStateStore.reset()
+        val plugin = BilibiliPublisherPlugin(
+            loadConfig = { testConfig(pollingIntervalSeconds = 30.0) },
+            serviceFactory = {
+                defaultGateway().also(gateways::add)
+            },
+            cursorStoreFactory = { InMemoryCursorStore() },
+            liveStatusStoreFactory = { InMemoryLiveStatusStore() },
+            taskScheduler = scheduler,
+        )
+
+        plugin.init()
+        plugin.start()
+        plugin.stop()
+
+        assertEquals(1, gateways.size)
+        assertEquals(1, gateways[0].closeCount)
+
+        plugin.start()
+        assertEquals(2, gateways.size)
+        assertEquals(1, gateways[0].closeCount)
+        assertEquals(0, gateways[1].closeCount)
+
+        plugin.stop()
+        assertEquals(1, gateways[1].closeCount)
+    }
+
+    @Test
     fun `poll service checkLoginState should map BiliLoginException to failed result`() = runBlocking {
         val service = BilibiliPollService(
             requestIntervalMs = 0,
@@ -1491,6 +1523,12 @@ class BilibiliPublisherPluginTest {
         val requestedLiveRooms: MutableList<String> = mutableListOf()
         val expandedShortUrls: MutableList<String> = mutableListOf()
         val unfollowedUsers: MutableList<String> = mutableListOf()
+        var closeCount: Int = 0
+            private set
+
+        override fun close() {
+            closeCount += 1
+        }
 
         override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
             requestedPages.add(page)

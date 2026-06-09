@@ -118,6 +118,9 @@ internal class BilibiliPublisherRuntime() :
     private lateinit var detectTask: TaskDefinition
 
     @Volatile
+    private var pollServiceClosed: Boolean = false
+
+    @Volatile
     private var dynamicPublishers: Map<Int, Publisher> = emptyMap()
 
     @Volatile
@@ -168,7 +171,7 @@ internal class BilibiliPublisherRuntime() :
             saveConfig = { id, next -> context.configService.save(id, next) }
         }
         config = loadConfig(pluginId)
-        pollService = serviceFactory(secondsToMillis(config.requestIntervalSeconds, minimumMillis = 0))
+        rebuildPollService()
         mapper = BilibiliDynamicMapper()
         requestFailureHandler = BilibiliRequestFailureHandler(
             configProvider = { config },
@@ -207,6 +210,7 @@ internal class BilibiliPublisherRuntime() :
     }
 
     override suspend fun onStart() {
+        ensurePollServiceReady()
         val loginResult = pollService.checkLoginState()
         if (loginResult.status == PublisherLoginStatus.SUCCESS) {
             requestFailureHandler.recordSuccess("登录状态检查")
@@ -238,7 +242,12 @@ internal class BilibiliPublisherRuntime() :
 
     override suspend fun onStop() {
         taskScheduler.stop(detectTaskId)
+        closePollService("stop")
         logger.info { "Bilibili 轮询已停止" }
+    }
+
+    override suspend fun onUnload() {
+        closePollService("unload")
     }
 
     override fun currentConfig(): BilibiliPublisherConfig {
@@ -282,6 +291,7 @@ internal class BilibiliPublisherRuntime() :
     }
 
     override suspend fun fetchPublisherInfo(userId: String): PublisherInfo? {
+        ensurePollServiceReady()
         val snapshot = runBilibiliRequest("发布者资料查询 uid=$userId") {
             pollService.fetchPublisherSnapshot(userId)
         }.getOrNull() ?: return null
@@ -297,23 +307,27 @@ internal class BilibiliPublisherRuntime() :
     }
 
     override suspend fun queryFollowState(userId: String): FollowState {
+        ensurePollServiceReady()
         return followService.queryFollowState(userId)
     }
 
     override suspend fun followPublisher(userId: String): FollowActionResult {
+        ensurePollServiceReady()
         return followService.followPublisher(userId)
     }
 
     override suspend fun unfollowPublisher(userId: String): FollowActionResult {
+        ensurePollServiceReady()
         return followService.unfollowPublisher(userId)
     }
 
     override suspend fun checkLoginState(): PublisherLoginResult {
+        ensurePollServiceReady()
         return pollService.checkLoginState()
     }
 
     override suspend fun exportCookie(): String? {
-        val cookiesJson = if (::pollService.isInitialized) {
+        val cookiesJson = if (::pollService.isInitialized && !pollServiceClosed) {
             pollService.exportCookiesJson()
         } else {
             currentConfig().cookiesJson
@@ -336,20 +350,24 @@ internal class BilibiliPublisherRuntime() :
     }
 
     override suspend fun parseLink(inputUrl: String): ParsedLink? {
+        ensurePollServiceReady()
         return linkResolver.parseLink(inputUrl)
     }
 
     override suspend fun resolveLink(parsedLink: ParsedLink): LinkResolution {
+        ensurePollServiceReady()
         return linkResolver.resolveLink(parsedLink)
     }
 
     override suspend fun downloadVideoLink(request: LinkVideoDownloadRequest): LinkVideoDownloadResult {
+        ensurePollServiceReady()
         return requestFailureHandler.run("视频下载 id=${request.parsedLink.targetId}") {
             pollService.downloadVideoLink(request)
         }.getOrThrow()
     }
 
     override suspend fun loginByCookie(cookie: String): PublisherLoginResult {
+        ensurePollServiceReady()
         val result = pollService.loginByCookie(cookie)
         persistCookiesIfLoggedIn(result)
         if (result.status == PublisherLoginStatus.SUCCESS) {
@@ -363,6 +381,7 @@ internal class BilibiliPublisherRuntime() :
         onQrCode: suspend (PublisherQrLoginChallenge) -> Unit,
         onStatusChanged: suspend (PublisherLoginResult) -> Unit,
     ): PublisherLoginResult {
+        ensurePollServiceReady()
         val result = pollService.loginByQrCode(onQrCode, onStatusChanged)
         persistCookiesIfLoggedIn(result)
         if (result.status == PublisherLoginStatus.SUCCESS) {
@@ -964,6 +983,31 @@ internal class BilibiliPublisherRuntime() :
                 "Bilibili 订阅发布者已加载：动态=${loadedDynamic.size}，直播=${loadedLive.size}"
             }
         }
+    }
+
+    private suspend fun ensurePollServiceReady() {
+        if (::pollService.isInitialized && !pollServiceClosed) return
+        rebuildPollService()
+        importStoredCookies()
+    }
+
+    private fun rebuildPollService() {
+        pollService = serviceFactory(secondsToMillis(config.requestIntervalSeconds, minimumMillis = 0))
+        pollServiceClosed = false
+    }
+
+    private fun closePollService(reason: String) {
+        if (!::pollService.isInitialized || pollServiceClosed) return
+        runCatching { persistRuntimeCookiesIfChanged() }
+            .onFailure {
+                logger.warn(it) { "关闭 Bilibili 客户端前回存 Cookie 失败：reason=$reason" }
+            }
+        runCatching { pollService.close() }
+            .onFailure {
+                logger.warn(it) { "关闭 Bilibili 客户端失败：reason=$reason" }
+            }
+        pollServiceClosed = true
+        logger.debug { "Bilibili 客户端已关闭：reason=$reason" }
     }
 
     private suspend fun importStoredCookies() {

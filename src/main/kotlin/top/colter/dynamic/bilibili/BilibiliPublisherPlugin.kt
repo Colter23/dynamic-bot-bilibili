@@ -86,6 +86,10 @@ public class BilibiliPublisherPlugin private constructor(
         runtime.onStop()
     }
 
+    override suspend fun onUnload() {
+        runtime.onUnload()
+    }
+
     override fun currentConfig(): BilibiliPublisherConfig {
         return runtime.currentConfig()
     }

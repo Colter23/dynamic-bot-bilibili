@@ -113,6 +113,9 @@ private class BilibiliVideoDownloadSizeExceededException(
 ) : BiliDownloadException("视频下载超过大小上限：maxBytes=$maxBytes")
 
 internal interface BilibiliPlatformGateway {
+    fun close() {
+    }
+
     suspend fun fetchNewDynamicPage(page: Int = 1, type: String = "all"): BiliDynamicList {
         throw UnsupportedOperationException("不支持拉取动态列表")
     }
@@ -210,6 +213,9 @@ internal interface BilibiliQrLoginGateway {
         onQrCode: suspend (QrCodeLoginData) -> Unit,
         onStatusChanged: suspend (QrCodeLoginResult) -> Unit,
     ): BilibiliQrLoginOutcome
+
+    fun close() {
+    }
 }
 
 internal class BilibiliClientQrLoginGateway(
@@ -227,6 +233,10 @@ internal class BilibiliClientQrLoginGateway(
             cookiesJson = client.exportEditCookiesJson(),
         )
     }
+
+    override fun close() {
+        client.close()
+    }
 }
 
 internal class BilibiliPollService(
@@ -235,6 +245,10 @@ internal class BilibiliPollService(
     private val currentUserNavProvider: suspend () -> BiliUserInfo = { client.getCurrentUserNav() },
     private val qrLoginGatewayFactory: () -> BilibiliQrLoginGateway = { BilibiliClientQrLoginGateway() },
 ) : BilibiliPlatformGateway {
+    override fun close() {
+        client.close()
+    }
+
     override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
         val list = client.getNewDynamic(page, type)
         applyRequestDelay()
@@ -523,8 +537,9 @@ internal class BilibiliPollService(
         onQrCode: suspend (PublisherQrLoginChallenge) -> Unit,
         onStatusChanged: suspend (PublisherLoginResult) -> Unit,
     ): PublisherLoginResult {
+        val gateway = qrLoginGatewayFactory()
         return try {
-            val outcome = qrLoginGatewayFactory().loginByQrCode(
+            val outcome = gateway.loginByQrCode(
                 onQrCode = { qrCodeData -> onQrCode(qrCodeData.toChallenge()) },
                 onStatusChanged = { qrCodeResult -> onStatusChanged(qrCodeResult.toPublisherLoginResult()) },
             )
@@ -539,6 +554,8 @@ internal class BilibiliPollService(
             throw e
         } catch (e: Throwable) {
             e.toQrFailureResult()
+        } finally {
+            runCatching { gateway.close() }
         }
     }
 
