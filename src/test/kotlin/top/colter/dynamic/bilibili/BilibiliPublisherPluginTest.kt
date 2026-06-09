@@ -125,6 +125,20 @@ class BilibiliPublisherPluginTest {
         return TestTaskScheduler(CoroutineScope(SupervisorJob() + Dispatchers.Default))
     }
 
+    private fun waitForTaskRun(scheduler: TaskScheduler, runCount: Long = 1) {
+        runBlocking {
+            withTimeout(3_000) {
+                while (true) {
+                    val snapshot = scheduler.snapshot("bilibili-detect")
+                    if ((snapshot?.runCount ?: 0L) >= runCount && snapshot?.lastSuccessAtMillis != null) {
+                        break
+                    }
+                    delay(10)
+                }
+            }
+        }
+    }
+
     @Test
     fun `fetchPublisherInfo should map gateway snapshot to publisher info`() = runBlocking {
         val gateway = FakeGateway(
@@ -440,6 +454,7 @@ class BilibiliPublisherPluginTest {
     @Test
     fun `replay window zero should warm up current page only`() {
         val now = System.currentTimeMillis() / 1000
+        val scheduler = testScheduler()
         val cursorStore = InMemoryCursorStore()
         val gateway = FakeGateway(
             snapshot = null,
@@ -452,6 +467,7 @@ class BilibiliPublisherPluginTest {
             gateway,
             config = testConfig(replayWindowMinutes = 0),
             cursorStore = cursorStore,
+            taskScheduler = scheduler,
         )
 
         val seeded = seedPublisherAndSubscriber()
@@ -477,6 +493,7 @@ class BilibiliPublisherPluginTest {
 
         plugin.init()
         plugin.start()
+        waitForTaskRun(scheduler)
 
         val publisherId = seeded.publisher.id
         assertEquals(
@@ -493,6 +510,7 @@ class BilibiliPublisherPluginTest {
     @Test
     fun `replay window should backfill missed dynamics in order when cursor exists`() {
         val now = System.currentTimeMillis() / 1000
+        val scheduler = testScheduler()
         val cursorStore = InMemoryCursorStore()
         val gateway = FakeGateway(
             snapshot = null,
@@ -505,6 +523,7 @@ class BilibiliPublisherPluginTest {
             gateway,
             config = testConfig(replayWindowMinutes = 120),
             cursorStore = cursorStore,
+            taskScheduler = scheduler,
         )
 
         val seeded = seedPublisherAndSubscriber()
@@ -530,6 +549,7 @@ class BilibiliPublisherPluginTest {
 
         plugin.init()
         plugin.start()
+        waitForTaskRun(scheduler)
 
         val publisherId = seeded.publisher.id
         assertEquals(
@@ -548,6 +568,7 @@ class BilibiliPublisherPluginTest {
     @Test
     fun `replay window should keep collected pages when later page fails`() {
         val now = System.currentTimeMillis() / 1000
+        val scheduler = testScheduler()
         val cursorStore = InMemoryCursorStore()
         val gateway = FakeGateway(
             snapshot = null,
@@ -561,6 +582,7 @@ class BilibiliPublisherPluginTest {
             gateway,
             config = testConfig(replayWindowMinutes = 120),
             cursorStore = cursorStore,
+            taskScheduler = scheduler,
         )
 
         val seeded = seedPublisherAndSubscriber()
@@ -585,6 +607,7 @@ class BilibiliPublisherPluginTest {
 
         plugin.init()
         plugin.start()
+        waitForTaskRun(scheduler)
 
         assertEquals(listOf(1, 2), gateway.requestedPages.take(2))
         assertEquals(
@@ -978,6 +1001,7 @@ class BilibiliPublisherPluginTest {
 
     @Test
     fun `live polling should baseline startup then emit started and ended updates`() = runBlocking {
+        val scheduler = testScheduler()
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
@@ -990,12 +1014,14 @@ class BilibiliPublisherPluginTest {
             gateway,
             config = testConfig(pollingIntervalSeconds = 0.025),
             liveStatusStore = liveStore,
+            taskScheduler = scheduler,
         )
         val sourceUpdates = RecordingSourceUpdatePublisher()
         seedPublisherAndSubscriber(policy = livePolicy())
 
         plugin.init(sourceUpdates)
         plugin.start()
+        waitForTaskRun(scheduler)
         assertEquals(LiveStatus.CLOSE, liveStore.get(1)?.status)
         assertNull(withTimeoutOrNull(100) { sourceUpdates.receive() })
 
@@ -1013,6 +1039,43 @@ class BilibiliPublisherPluginTest {
         assertEquals(SourceEventType.LIVE_ENDED, endedUpdate.eventType)
         assertEquals(startedAt, ended.startedAtEpochSeconds)
         assertTrue(ended.endedAtEpochSeconds != null)
+
+        plugin.stop()
+    }
+
+    @Test
+    fun `live status warmup should not block plugin start`() = runBlocking {
+        val scheduler = testScheduler()
+        val liveBatchStarted = CompletableDeferred<Unit>()
+        val liveBatchContinue = CompletableDeferred<Unit>()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            initialLiveSnapshots = mapOf(123L to liveSnapshot(LiveStatus.CLOSE)),
+            liveBatchStarted = liveBatchStarted,
+            liveBatchContinue = liveBatchContinue,
+        )
+        val liveStore = InMemoryLiveStatusStore()
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(pollingIntervalSeconds = 30.0),
+            liveStatusStore = liveStore,
+            taskScheduler = scheduler,
+        )
+        seedPublisherAndSubscriber(policy = livePolicy())
+
+        plugin.init()
+        withTimeout(300) {
+            plugin.start()
+        }
+
+        assertTrue(scheduler.isRunning("bilibili-detect"))
+        withTimeout(1_000) { liveBatchStarted.await() }
+        liveBatchContinue.complete(Unit)
+        waitForTaskRun(scheduler)
+        assertEquals(LiveStatus.CLOSE, liveStore.get(1)?.status)
 
         plugin.stop()
     }
@@ -1117,6 +1180,7 @@ class BilibiliPublisherPluginTest {
 
     @Test
     fun `live polling should skip failed batches and process successful batches`() = runBlocking {
+        val scheduler = testScheduler()
         val startedAt = System.currentTimeMillis() / 1000 - 60
         val liveStore = InMemoryLiveStatusStore()
         val gateway = FakeGateway(
@@ -1133,6 +1197,7 @@ class BilibiliPublisherPluginTest {
             gateway,
             config = testConfig(pollingIntervalSeconds = 0.025, liveStatusBatchSize = 1),
             liveStatusStore = liveStore,
+            taskScheduler = scheduler,
         )
         val sourceUpdates = RecordingSourceUpdatePublisher()
         val failedPublisher = seedPublisherAndSubscriber(
@@ -1148,6 +1213,7 @@ class BilibiliPublisherPluginTest {
 
         plugin.init(sourceUpdates)
         plugin.start()
+        waitForTaskRun(scheduler)
         assertEquals(LiveStatus.OPEN, liveStore.get(failedPublisher.id)?.status)
         assertEquals(LiveStatus.OPEN, liveStore.get(closedPublisher.id)?.status)
 
@@ -1170,6 +1236,7 @@ class BilibiliPublisherPluginTest {
 
     @Test
     fun `live polling should request status in configured batches`() {
+        val scheduler = testScheduler()
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
@@ -1179,6 +1246,7 @@ class BilibiliPublisherPluginTest {
         val plugin = testPlugin(
             gateway,
             config = testConfig(pollingIntervalSeconds = 30.0, liveStatusBatchSize = 2),
+            taskScheduler = scheduler,
         )
         seedPublisherAndSubscriber(externalId = "101", targetId = "9001", policy = livePolicy())
         seedPublisherAndSubscriber(externalId = "102", targetId = "9002", policy = livePolicy())
@@ -1186,6 +1254,7 @@ class BilibiliPublisherPluginTest {
 
         plugin.init()
         plugin.start()
+        waitForTaskRun(scheduler)
         plugin.stop()
 
         assertEquals(listOf(listOf(101L, 102L), listOf(103L)), gateway.requestedLiveBatches.take(2))
@@ -1215,6 +1284,7 @@ class BilibiliPublisherPluginTest {
 
     @Test
     fun `dynamic polling should ignore live only subscriptions`() {
+        val scheduler = testScheduler()
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.FOLLOWING,
@@ -1225,11 +1295,13 @@ class BilibiliPublisherPluginTest {
         val plugin = testPlugin(
             gateway,
             config = testConfig(pollingIntervalSeconds = 30.0),
+            taskScheduler = scheduler,
         )
         seedPublisherAndSubscriber(policy = livePolicy())
 
         plugin.init()
         plugin.start()
+        waitForTaskRun(scheduler)
         plugin.stop()
 
         assertTrue(gateway.requestedPages.isEmpty())
@@ -1504,6 +1576,8 @@ class BilibiliPublisherPluginTest {
         initialGroups: List<BiliGroup> = emptyList(),
         initialLiveSnapshots: Map<Long, BilibiliLiveSnapshot> = emptyMap(),
         failingLiveBatches: Set<List<Long>> = emptySet(),
+        private val liveBatchStarted: CompletableDeferred<Unit>? = null,
+        private val liveBatchContinue: CompletableDeferred<Unit>? = null,
     ) : BilibiliPlatformGateway {
         private val groups: MutableList<BiliGroup> = initialGroups.toMutableList()
         private val dynamicPages: MutableMap<Int, BiliDynamicList> = initialDynamicPages.toMutableMap()
@@ -1572,6 +1646,8 @@ class BilibiliPublisherPluginTest {
         override suspend fun fetchLiveStatusBatch(uids: Iterable<Long>): List<BilibiliLiveSnapshot> {
             val requested = uids.toList()
             requestedLiveBatches.add(requested)
+            liveBatchStarted?.complete(Unit)
+            liveBatchContinue?.await()
             if (requested in liveBatchFailures) {
                 error("live status failed: $requested")
             }

@@ -106,6 +106,7 @@ internal class BilibiliPublisherRuntime() :
 
     private val detectMutex: Mutex = Mutex()
     private val publisherLock: Any = Any()
+    private val startupBootstrapLock: Any = Any()
 
     private lateinit var config: BilibiliPublisherConfig
     private lateinit var pollService: BilibiliPlatformGateway
@@ -128,6 +129,11 @@ internal class BilibiliPublisherRuntime() :
 
     @Volatile
     private var pendingDetection: Boolean = false
+
+    private var startupFollowGroupPending: Boolean = false
+    private var startupReplayPending: Boolean = false
+    private var startupCursorWarmupPending: Boolean = false
+    private var startupLiveWarmupPending: Boolean = false
 
     internal constructor(
         loadConfig: (String) -> BilibiliPublisherConfig,
@@ -422,6 +428,7 @@ internal class BilibiliPublisherRuntime() :
 
     private suspend fun detectAndPublishLocked() {
         loadActivePublishers(logSummary = false)
+        val startupLiveWarmupAttempted = runStartupBootstrapIfPending()
         val dynamicPublisherSnapshot = dynamicPublishers
         val livePublisherSnapshot = livePublishers
         if (dynamicPublisherSnapshot.isEmpty() && livePublisherSnapshot.isEmpty()) {
@@ -478,7 +485,7 @@ internal class BilibiliPublisherRuntime() :
                     }
             }
         }
-        if (requestFailureHandler.isPollingPaused()) return
+        if (requestFailureHandler.isPollingPaused() || startupLiveWarmupAttempted) return
         detectLiveStatusChanges(livePublisherSnapshot)
     }
 
@@ -513,13 +520,52 @@ internal class BilibiliPublisherRuntime() :
 
     private suspend fun bootstrapLoggedInState(allowReplay: Boolean): Boolean {
         loadActivePublishers()
-        runCatching { followService.ensureFollowGroupInitialized() }
-            .onFailure {
-                logger.warn(it) {
-                    "Bilibili 关注分组初始化失败"
-                }
+        scheduleStartupBootstrap(allowReplay)
+        return startDetectionTask()
+    }
+
+    private fun scheduleStartupBootstrap(allowReplay: Boolean) {
+        synchronized(startupBootstrapLock) {
+            startupFollowGroupPending = true
+            if (config.replayWindowMinutes > 0 && allowReplay) {
+                startupReplayPending = true
+                startupCursorWarmupPending = false
+            } else if (!taskScheduler.isRunning(detectTaskId)) {
+                startupCursorWarmupPending = true
             }
-        if (config.replayWindowMinutes > 0 && allowReplay) {
+            startupLiveWarmupPending = true
+        }
+    }
+
+    private fun takeStartupBootstrapPlan(): StartupBootstrapPlan {
+        return synchronized(startupBootstrapLock) {
+            StartupBootstrapPlan(
+                initializeFollowGroup = startupFollowGroupPending,
+                replayMissingDynamics = startupReplayPending,
+                warmUpExistingCursors = startupCursorWarmupPending,
+                warmUpLiveStatuses = startupLiveWarmupPending,
+            ).also {
+                startupFollowGroupPending = false
+                startupReplayPending = false
+                startupCursorWarmupPending = false
+                startupLiveWarmupPending = false
+            }
+        }
+    }
+
+    private suspend fun runStartupBootstrapIfPending(): Boolean {
+        val plan = takeStartupBootstrapPlan()
+        if (!plan.hasWork) return false
+
+        if (plan.initializeFollowGroup) {
+            runCatching { followService.ensureFollowGroupInitialized() }
+                .onFailure {
+                    logger.warn(it) {
+                        "Bilibili 关注分组初始化失败"
+                    }
+                }
+        }
+        if (plan.replayMissingDynamics) {
             runCatching { replayMissingDynamics() }
                 .onFailure {
                     logger.warn {
@@ -529,7 +575,7 @@ internal class BilibiliPublisherRuntime() :
                         "Bilibili 历史动态补发异常详情"
                     }
                 }
-        } else if (!taskScheduler.isRunning(detectTaskId)) {
+        } else if (plan.warmUpExistingCursors) {
             runCatching { warmUpExistingCursors() }
                 .onFailure {
                     logger.warn(it) {
@@ -537,13 +583,15 @@ internal class BilibiliPublisherRuntime() :
                     }
                 }
         }
-        runCatching { warmUpLiveStatuses() }
-            .onFailure {
-                logger.warn(it) {
-                    "Bilibili 直播状态预热失败"
+        if (plan.warmUpLiveStatuses) {
+            runCatching { warmUpLiveStatuses() }
+                .onFailure {
+                    logger.warn(it) {
+                        "Bilibili 直播状态预热失败"
+                    }
                 }
-            }
-        return startDetectionTask()
+        }
+        return plan.warmUpLiveStatuses
     }
 
     private suspend fun warmUpExistingCursors() {
@@ -1136,6 +1184,16 @@ internal class BilibiliPublisherRuntime() :
         val snapshotsByUid: Map<Long, BilibiliLiveSnapshot> = emptyMap(),
         val unavailableUids: Set<Long> = emptySet(),
     )
+
+    private data class StartupBootstrapPlan(
+        val initializeFollowGroup: Boolean,
+        val replayMissingDynamics: Boolean,
+        val warmUpExistingCursors: Boolean,
+        val warmUpLiveStatuses: Boolean,
+    ) {
+        val hasWork: Boolean
+            get() = initializeFollowGroup || replayMissingDynamics || warmUpExistingCursors || warmUpLiveStatuses
+    }
 
     private companion object {
         private const val BILIBILI_HOME: String = "https://www.bilibili.com"
