@@ -760,7 +760,11 @@ internal class BilibiliDynamicMapper {
             displayName = "Bilibili",
             homepageUri = BILIBILI_HOME,
             iconUri = "$BILIBILI_HOME/favicon.ico",
-            capabilities = setOf(PlatformCapability.PUBLISHER_SOURCE, PlatformCapability.LINK_RESOLVER),
+            capabilities = setOf(
+                PlatformCapability.PUBLISHER_SOURCE,
+                PlatformCapability.LIVE_SOURCE,
+                PlatformCapability.LINK_RESOLVER,
+            ),
         )
     }
 }

@@ -74,6 +74,7 @@ internal class BilibiliPublisherRuntime() :
     private val detectTaskId: String = "bilibili-detect"
 
     override val platformId: PlatformId = PlatformId.of("bilibili")
+    override val platformDescriptor: PlatformDescriptor = BILIBILI_PLATFORM
 
     override val configId: String
         get() = pluginId
@@ -1101,7 +1102,11 @@ internal class BilibiliPublisherRuntime() :
             displayName = "Bilibili",
             homepageUri = BILIBILI_HOME,
             iconUri = "$BILIBILI_HOME/favicon.ico",
-            capabilities = setOf(PlatformCapability.PUBLISHER_SOURCE, PlatformCapability.LINK_RESOLVER),
+            capabilities = setOf(
+                PlatformCapability.PUBLISHER_SOURCE,
+                PlatformCapability.LIVE_SOURCE,
+                PlatformCapability.LINK_RESOLVER,
+            ),
         )
     }
 }

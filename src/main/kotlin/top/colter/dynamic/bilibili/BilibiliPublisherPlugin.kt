@@ -2,6 +2,7 @@ package top.colter.dynamic.bilibili
 
 import top.colter.dynamic.core.config.ConfigApplyResult
 import top.colter.dynamic.core.config.ConfigurablePlugin
+import top.colter.dynamic.core.data.PlatformDescriptor
 import top.colter.dynamic.core.data.PlatformId
 import top.colter.dynamic.core.data.PublisherInfo
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
@@ -56,6 +57,8 @@ public class BilibiliPublisherPlugin private constructor(
 
     override val platformId: PlatformId
         get() = runtime.platformId
+    override val platformDescriptor: PlatformDescriptor
+        get() = runtime.platformDescriptor
 
     override val configId: String
         get() = runtime.configId
