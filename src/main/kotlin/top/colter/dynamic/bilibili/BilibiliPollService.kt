@@ -250,16 +250,12 @@ internal class BilibiliPollService(
     }
 
     override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
-        val list = client.getNewDynamic(page, type)
-        applyRequestDelay()
-        return list
+        return callWithRequestDelay { client.getNewDynamic(page, type) }
     }
 
     override suspend fun fetchDynamicDetail(dynamicId: String): BiliDynamic? {
         val id = dynamicId.toLongOrNull() ?: return null
-        val detail = client.getDynamicDetail(id)
-        applyRequestDelay()
-        return detail
+        return callWithRequestDelay { client.getDynamicDetail(id) }
     }
 
     override suspend fun expandShortUrl(url: String, timeoutMs: Long): String? {
@@ -273,8 +269,7 @@ internal class BilibiliPollService(
 
     override suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot? {
         val uid = userId.toLongOrNull() ?: return null
-        val info = client.getUserInfo(uid)
-        applyRequestDelay()
+        val info = callWithRequestDelay { client.getUserInfo(uid) }
         return BilibiliPublisherSnapshot(
             userId = info.mid.toString(),
             name = info.name,
@@ -290,8 +285,7 @@ internal class BilibiliPollService(
         if (normalized.isBlank()) return null
         val aid = normalized.removePrefix("av").removePrefix("AV").toLongOrNull()
         val bvid = normalized.takeIf { it.startsWith("BV", ignoreCase = true) }
-        val video = client.getVideoDetail(aid = aid, bvid = bvid)
-        applyRequestDelay()
+        val video = callWithRequestDelay { client.getVideoDetail(aid = aid, bvid = bvid) }
         return video.toSnapshot()
     }
 
@@ -360,8 +354,7 @@ internal class BilibiliPollService(
 
     override suspend fun fetchLiveRoomSnapshot(roomId: String): BilibiliLiveRoomSnapshot? {
         val id = roomId.toLongOrNull() ?: return null
-        val info = client.getLiveInfo(id)
-        applyRequestDelay()
+        val info = callWithRequestDelay { client.getLiveInfo(id) }
         return BilibiliLiveRoomSnapshot(
             userId = info.uid.takeIf { it > 0 }?.toString().orEmpty(),
             roomId = info.roomId.takeIf { it > 0 }?.toString() ?: roomId,
@@ -388,8 +381,7 @@ internal class BilibiliPollService(
     override suspend fun fetchLiveStatusBatch(uids: Iterable<Long>): List<BilibiliLiveSnapshot> {
         val uidList = uids.toList()
         if (uidList.isEmpty()) return emptyList()
-        val data = client.getLiveStatusBatch(uidList)
-        applyRequestDelay()
+        val data = callWithRequestDelay { client.getLiveStatusBatch(uidList) }
         return data.map { (uid, live) ->
             BilibiliLiveSnapshot(
                 userId = live.uid.takeIf { it > 0 }?.toString() ?: uid.toString(),
@@ -421,8 +413,7 @@ internal class BilibiliPollService(
 
     override suspend fun fetchFollowRelation(userId: String): BilibiliFollowRelationSnapshot? {
         val uid = userId.toLongOrNull() ?: return null
-        val relation = client.relation(uid)
-        applyRequestDelay()
+        val relation = callWithRequestDelay { client.relation(uid) }
         return BilibiliFollowRelationSnapshot(
             userId = relation.mid.takeIf { it > 0 }?.toString() ?: uid.toString(),
             following = relation.attribute.isFollowingRelation(),
@@ -440,8 +431,7 @@ internal class BilibiliPollService(
                         FollowActionStatus.FAILED,
                         "无效的 Bilibili 用户 ID：$userId",
                     )
-                client.follow(uid)
-                applyRequestDelay()
+                callWithRequestDelay { client.follow(uid) }
                 FollowActionResult(FollowActionStatus.DONE)
             }
         }
@@ -453,8 +443,7 @@ internal class BilibiliPollService(
                 FollowActionStatus.FAILED,
                 "无效的 Bilibili 用户 ID：$userId",
             )
-        client.unfollow(uid)
-        applyRequestDelay()
+        callWithRequestDelay { client.unfollow(uid) }
         return FollowActionResult(
             FollowActionStatus.DONE,
             "已取消关注 Bilibili 用户：$userId",
@@ -462,19 +451,15 @@ internal class BilibiliPollService(
     }
 
     override suspend fun fetchFollowGroups(): List<BiliGroup> {
-        val groups = client.getGroupList()
-        applyRequestDelay()
-        return groups
+        return callWithRequestDelay { client.getGroupList() }
     }
 
     override suspend fun createFollowGroup(tag: String) {
-        client.createGroup(tag)
-        applyRequestDelay()
+        callWithRequestDelay { client.createGroup(tag) }
     }
 
     override suspend fun addUsersToFollowGroup(fids: Iterable<Long>, tagIds: Iterable<Long>) {
-        client.modifyGroupUsers(fids, tagIds)
-        applyRequestDelay()
+        callWithRequestDelay { client.modifyGroupUsers(fids, tagIds) }
     }
 
     override suspend fun checkLoginState(): PublisherLoginResult {
@@ -562,6 +547,14 @@ internal class BilibiliPollService(
     private suspend fun applyRequestDelay() {
         if (requestIntervalMs > 0) {
             delay(requestIntervalMs)
+        }
+    }
+
+    private suspend fun <T> callWithRequestDelay(block: suspend () -> T): T {
+        return try {
+            block()
+        } finally {
+            applyRequestDelay()
         }
     }
 

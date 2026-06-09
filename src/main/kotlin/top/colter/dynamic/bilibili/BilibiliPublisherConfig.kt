@@ -14,6 +14,7 @@ public data class BilibiliPublisherConfig(
     val liveDetectionEnabled: Boolean = true,
     val liveStatusBatchSize: Int = 30,
     val maxConsecutiveLoginFailures: Int = 3,
+    val requestBlockCooldownMinutes: Int = 30,
     val cookiesJson: String = "",
 )
 
@@ -91,6 +92,15 @@ public object BilibiliPublisherConfigForm {
                 min = 0,
                 numberKind = ConfigNumberKind.INTEGER,
             ),
+            ConfigFieldSpec(
+                path = "requestBlockCooldownMinutes",
+                label = "风控暂停时长（分钟）",
+                type = ConfigFieldType.NUMBER,
+                section = "异常处理",
+                description = "检测到 Bilibili 请求被风控或拦截后暂停轮询多久。\n设为 0 表示只记录异常，不进入冷却。",
+                min = 0,
+                numberKind = ConfigNumberKind.INTEGER,
+            ),
         ),
     )
 
@@ -101,5 +111,6 @@ public object BilibiliPublisherConfigForm {
         require(config.shortUrlResolveTimeoutSeconds > 0.0) { "短链接解析超时必须大于 0 秒" }
         require(config.liveStatusBatchSize >= 1) { "直播状态批量查询数量不能小于 1" }
         require(config.maxConsecutiveLoginFailures >= 0) { "未登录熔断次数不能为负数" }
+        require(config.requestBlockCooldownMinutes >= 0) { "风控暂停时长不能为负数" }
     }
 }

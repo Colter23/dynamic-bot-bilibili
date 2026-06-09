@@ -130,6 +130,9 @@ internal class BilibiliPublisherRuntime() :
     @Volatile
     private var pendingDetection: Boolean = false
 
+    @Volatile
+    private var pendingDetectionSkipLive: Boolean = false
+
     private var startupFollowGroupPending: Boolean = false
     private var startupReplayPending: Boolean = false
     private var startupCursorWarmupPending: Boolean = false
@@ -397,21 +400,28 @@ internal class BilibiliPublisherRuntime() :
         return result
     }
 
-    private suspend fun detectAndPublish() {
+    private suspend fun detectAndPublish(skipLiveDetection: Boolean = false) {
         if (::requestFailureHandler.isInitialized && requestFailureHandler.isPollingPaused()) {
-            logger.debug { "Bilibili 检测跳过：登录状态失效，轮询请求已暂停" }
+            logger.debug { "Bilibili 检测跳过：轮询请求已暂停" }
             return
         }
         if (!detectMutex.tryLock()) {
             pendingDetection = true
+            if (skipLiveDetection) {
+                pendingDetectionSkipLive = true
+            }
             logger.debug { "Bilibili 检测仍在执行，本轮已标记为补跑" }
             return
         }
 
         try {
+            var skipLiveForCurrentRun = skipLiveDetection
             do {
+                val skipLiveForRun = skipLiveForCurrentRun || pendingDetectionSkipLive
                 pendingDetection = false
-                detectAndPublishLocked()
+                pendingDetectionSkipLive = false
+                skipLiveForCurrentRun = false
+                detectAndPublishLocked(skipLiveForRun)
             } while (pendingDetection)
             persistRuntimeCookiesIfChanged()
         } finally {
@@ -426,7 +436,7 @@ internal class BilibiliPublisherRuntime() :
         return requestFailureHandler.run(operation, block)
     }
 
-    private suspend fun detectAndPublishLocked() {
+    private suspend fun detectAndPublishLocked(skipLiveDetection: Boolean) {
         loadActivePublishers(logSummary = false)
         val startupLiveWarmupAttempted = runStartupBootstrapIfPending()
         val dynamicPublisherSnapshot = dynamicPublishers
@@ -488,7 +498,7 @@ internal class BilibiliPublisherRuntime() :
                 }
             }
         }
-        if (requestFailureHandler.isPollingPaused() || startupLiveWarmupAttempted) return
+        if (requestFailureHandler.isPollingPaused() || startupLiveWarmupAttempted || skipLiveDetection) return
         detectLiveStatusChanges(livePublisherSnapshot)
     }
 
@@ -730,13 +740,12 @@ internal class BilibiliPublisherRuntime() :
         observedAt: Long,
     ): PublisherLiveStatus {
         val rawStatus = snapshot?.status ?: LiveStatus.CLOSE
-        // ROUND（轮播）是过渡态：直播中切轮播不代表下播，仅 CLOSE 才结束直播。
-        // 把 ROUND 归一为"延续上一已解析状态"——直播中→ROUND 视为仍在播，冷启动/已下播→ROUND 视为未播。
-        // 由于存储的 status 始终是 OPEN/CLOSE，可消除 OPEN↔ROUND 抖动产生的虚假开播/下播。
+        // ROUND（轮播）不是实时直播：冷启动/已下播时不触发开播，直播中转入 ROUND 时按下播处理。
+        // 存储层仍只保存 OPEN/CLOSE，避免后续 CLOSE/ROUND 抖动反复产生事件。
         val status = when (rawStatus) {
             LiveStatus.OPEN -> LiveStatus.OPEN
             LiveStatus.CLOSE -> LiveStatus.CLOSE
-            LiveStatus.ROUND -> if (previous?.status == LiveStatus.OPEN) LiveStatus.OPEN else LiveStatus.CLOSE
+            LiveStatus.ROUND -> LiveStatus.CLOSE
         }
         val roomId = snapshot?.roomId?.takeIf { it.isNotBlank() }
             ?: previous?.roomId
@@ -934,21 +943,38 @@ internal class BilibiliPublisherRuntime() :
             }
     }
 
-    private suspend fun ensureLiveBaseline(publisher: Publisher) {
-        if (!config.liveDetectionEnabled || liveStatusStore.get(publisher.id) != null) return
-        val uid = publisher.externalId.toLongOrNull() ?: return
+    private suspend fun ensureLiveBaseline(publisher: Publisher): Boolean {
+        if (!config.liveDetectionEnabled || liveStatusStore.get(publisher.id) != null) return false
+        val uid = publisher.externalId.toLongOrNull() ?: return false
         val now = System.currentTimeMillis() / 1000
         val liveFetch = fetchLiveSnapshotsByUid(listOf(publisher))
-        if (uid in liveFetch.unavailableUids) return
-        val snapshot = liveFetch.snapshotsByUid[uid] ?: return
-        liveStatusStore.save(
-            buildLiveState(
-                publisher = publisher,
-                snapshot = snapshot,
-                previous = null,
-                observedAt = now,
-            )
-        )
+        if (uid !in liveFetch.unavailableUids) {
+            liveFetch.snapshotsByUid[uid]?.let { snapshot ->
+                liveStatusStore.save(
+                    buildLiveState(
+                        publisher = publisher,
+                        snapshot = snapshot,
+                        previous = null,
+                        observedAt = now,
+                    )
+                )
+            }
+        }
+        return true
+    }
+
+    private suspend fun runDetectionAfterSubscriptionChange(
+        interests: PublisherInterests,
+        liveBaselineRequested: Boolean,
+    ) {
+        if (!taskScheduler.isRunning(detectTaskId) || !interests.hasAnyInterest) return
+        if (interests.hasDynamic || !liveBaselineRequested) {
+            detectAndPublish(skipLiveDetection = liveBaselineRequested)
+        } else {
+            logger.debug {
+                "Bilibili 订阅变更已完成直播状态基线，跳过本次即时直播检测以减少平台请求"
+            }
+        }
     }
 
     private suspend fun handleSubscribed(event: SubscriptionChangedEvent) {
@@ -965,10 +991,8 @@ internal class BilibiliPublisherRuntime() :
         }
 
         if (taskScheduler.isRunning(detectTaskId) && interests.hasAnyInterest) {
-            if (interests.becameLivePresent) {
-                ensureLiveBaseline(snapshot.publisher)
-            }
-            detectAndPublish()
+            val liveBaselineRequested = interests.becameLivePresent && ensureLiveBaseline(snapshot.publisher)
+            runDetectionAfterSubscriptionChange(interests, liveBaselineRequested)
         }
     }
 

@@ -18,11 +18,15 @@ private val requestFailureLogger = loggerFor<BilibiliRequestFailureHandler>()
 internal class BilibiliRequestFailureHandler(
     private val configProvider: () -> BilibiliPublisherConfig,
     private val notificationPublisher: SystemNotificationPublisher = NoopSystemNotificationPublisher,
+    private val clockMillis: () -> Long = { System.currentTimeMillis() },
 ) {
     private var consecutiveLoginFailures: Int = 0
     private var pollingPausedByLoginFailure: Boolean = false
+    private var requestBlockPausedUntilMillis: Long? = null
 
-    fun isPollingPaused(): Boolean = pollingPausedByLoginFailure
+    fun isPollingPaused(): Boolean {
+        return pollingPausedByLoginFailure || isRequestBlockCooldownActive()
+    }
 
     suspend fun <T> run(
         operation: String,
@@ -39,15 +43,17 @@ internal class BilibiliRequestFailureHandler(
     }
 
     suspend fun recordSuccess(operation: String) {
-        val wasPaused = pollingPausedByLoginFailure
-        if (consecutiveLoginFailures > 0 || pollingPausedByLoginFailure) {
+        val wasPausedByLogin = pollingPausedByLoginFailure
+        val wasPausedByRequestBlock = requestBlockPausedUntilMillis != null
+        if (consecutiveLoginFailures > 0 || wasPausedByLogin || wasPausedByRequestBlock) {
             requestFailureLogger.info {
-                "Bilibili 请求已恢复：operation=$operation，之前连续未登录失败=$consecutiveLoginFailures"
+                "Bilibili 请求已恢复：operation=$operation，之前连续未登录失败=$consecutiveLoginFailures，之前风控冷却=${wasPausedByRequestBlock}"
             }
         }
         consecutiveLoginFailures = 0
         pollingPausedByLoginFailure = false
-        if (wasPaused) {
+        requestBlockPausedUntilMillis = null
+        if (wasPausedByLogin) {
             publishNotification(
                 SystemNotificationPublishRequest(
                     type = "bilibili.login_recovered",
@@ -59,6 +65,18 @@ internal class BilibiliRequestFailureHandler(
                 ),
             )
         }
+        if (wasPausedByRequestBlock) {
+            publishNotification(
+                SystemNotificationPublishRequest(
+                    type = "bilibili.request_block_recovered",
+                    severity = SystemNotificationSeverity.INFO,
+                    title = "Bilibili 请求已恢复",
+                    content = "Bilibili 请求已恢复，风控冷却状态已解除。",
+                    dedupeKey = "bilibili.request_block_recovered",
+                    details = mapOf("operation" to operation),
+                ),
+            )
+        }
     }
 
     suspend fun recordFailure(operation: String, error: Throwable) {
@@ -66,11 +84,7 @@ internal class BilibiliRequestFailureHandler(
 
         when (error) {
             is BiliLoginException -> recordLoginFailure(operation, error)
-            is BiliBanException -> recordNonLoginBiliFailure(
-                operation = operation,
-                error = error,
-                category = "请求被风控或拦截",
-            )
+            is BiliBanException -> recordRequestBlockFailure(operation, error)
             is BiliAuthException -> recordNonLoginBiliFailure(
                 operation = operation,
                 error = error,
@@ -93,6 +107,46 @@ internal class BilibiliRequestFailureHandler(
             )
             else -> recordUnknownFailure(operation, error)
         }
+    }
+
+    private suspend fun recordRequestBlockFailure(operation: String, error: BiliBanException) {
+        consecutiveLoginFailures = 0
+        val cooldownMinutes = configProvider().requestBlockCooldownMinutes
+        if (cooldownMinutes <= 0) {
+            requestFailureLogger.warn(error) {
+                "Bilibili 请求被风控或拦截：operation=$operation，自动冷却已关闭，原因=${error.message ?: "未知"}"
+            }
+            return
+        }
+
+        val wasActive = isRequestBlockCooldownActive()
+        val until = clockMillis() + cooldownMinutes * MILLIS_PER_MINUTE
+        requestBlockPausedUntilMillis = maxOf(requestBlockPausedUntilMillis ?: 0L, until)
+        if (wasActive) {
+            requestFailureLogger.warn(error) {
+                "Bilibili 轮询仍处于风控冷却状态：operation=$operation，暂停到=${requestBlockPausedUntilMillis}"
+            }
+            return
+        }
+
+        requestFailureLogger.error(error) {
+            "Bilibili 请求被风控或拦截，已暂停轮询请求：operation=$operation，暂停分钟=$cooldownMinutes。"
+        }
+        publishNotification(
+            SystemNotificationPublishRequest(
+                type = "bilibili.request_block_paused",
+                severity = SystemNotificationSeverity.ERROR,
+                title = "Bilibili 请求被风控或拦截",
+                content = "Bilibili 检测到请求被风控或拦截，已暂停轮询 $cooldownMinutes 分钟以降低继续触发风控的风险。",
+                dedupeKey = "bilibili.request_block_paused",
+                details = mapOf(
+                    "operation" to operation,
+                    "cooldownMinutes" to cooldownMinutes.toString(),
+                    "pausedUntilMillis" to requestBlockPausedUntilMillis.toString(),
+                    "error" to (error.message ?: "未知"),
+                ),
+            ),
+        )
     }
 
     private suspend fun recordLoginFailure(operation: String, error: BiliLoginException) {
@@ -154,10 +208,19 @@ internal class BilibiliRequestFailureHandler(
         }
     }
 
+    private fun isRequestBlockCooldownActive(): Boolean {
+        val pausedUntil = requestBlockPausedUntilMillis ?: return false
+        return clockMillis() < pausedUntil
+    }
+
     private suspend fun publishNotification(request: SystemNotificationPublishRequest) {
         runCatching { notificationPublisher.publish(request) }
             .onFailure {
                 requestFailureLogger.warn(it) { "Bilibili 系统通知发布失败：type=${request.type}" }
             }
+    }
+
+    private companion object {
+        private const val MILLIS_PER_MINUTE: Long = 60_000L
     }
 }

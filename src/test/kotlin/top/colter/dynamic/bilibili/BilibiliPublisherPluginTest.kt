@@ -24,6 +24,7 @@ import top.colter.bilibili.data.login.QrCodeLoginResult
 import top.colter.bilibili.data.login.QrCodeLoginStatus
 import top.colter.bilibili.data.user.BiliGroup
 import top.colter.bilibili.data.user.BiliUserInfo
+import top.colter.bilibili.exception.BiliBanException
 import top.colter.bilibili.exception.BiliLoginException
 import top.colter.dynamic.core.data.EntityState
 import top.colter.dynamic.core.data.LivePayload
@@ -121,8 +122,8 @@ class BilibiliPublisherPluginTest {
         )
     }
 
-    private fun testScheduler(): TaskScheduler {
-        return TestTaskScheduler(CoroutineScope(SupervisorJob() + Dispatchers.Default))
+    private fun testScheduler(autoRun: Boolean = true): TaskScheduler {
+        return TestTaskScheduler(CoroutineScope(SupervisorJob() + Dispatchers.Default), autoRun)
     }
 
     private fun waitForTaskRun(scheduler: TaskScheduler, runCount: Long = 1) {
@@ -1164,7 +1165,7 @@ class BilibiliPublisherPluginTest {
         assertEquals("456", started.roomId)
         assertEquals(startedAt, started.startedAtEpochSeconds)
 
-        gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.CLOSE)))
+        gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.ROUND)))
         val endedUpdate = withTimeout(3_000) { sourceUpdates.receive() }.update
         val ended = assertIs<LivePayload>(endedUpdate.payload)
         assertEquals(SourceEventType.LIVE_ENDED, endedUpdate.eventType)
@@ -1225,6 +1226,7 @@ class BilibiliPublisherPluginTest {
             gateway,
             config = testConfig(pollingIntervalSeconds = 30.0),
             liveStatusStore = liveStore,
+            taskScheduler = testScheduler(autoRun = false),
         )
         val sourceUpdates = RecordingSourceUpdatePublisher()
         val seeded = seedPublisherAndSubscriber(policy = SubscriptionPolicy.default())
@@ -1245,6 +1247,7 @@ class BilibiliPublisherPluginTest {
         )
 
         assertEquals(LiveStatus.CLOSE, liveStore.get(seeded.publisher.id)?.status)
+        assertEquals(listOf(listOf(123L)), gateway.requestedLiveBatches)
         plugin.stop()
     }
 
@@ -1363,6 +1366,33 @@ class BilibiliPublisherPluginTest {
         assertEquals(LiveStatus.CLOSE, liveStore.get(closedPublisher.id)?.status)
 
         plugin.stop()
+    }
+
+    @Test
+    fun `live polling should stop remaining batches when request is blocked`() {
+        val scheduler = testScheduler()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            failingLiveBatches = setOf(listOf(101L)),
+            liveBatchFailure = BiliBanException("blocked"),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(pollingIntervalSeconds = 30.0, liveStatusBatchSize = 1),
+            taskScheduler = scheduler,
+        )
+        seedPublisherAndSubscriber(externalId = "101", targetId = "9001", policy = livePolicy())
+        seedPublisherAndSubscriber(externalId = "102", targetId = "9002", policy = livePolicy())
+
+        plugin.init()
+        plugin.start()
+        waitForTaskRun(scheduler)
+        plugin.stop()
+
+        assertEquals(listOf(listOf(101L)), gateway.requestedLiveBatches)
     }
 
     @Test
@@ -1574,6 +1604,7 @@ class BilibiliPublisherPluginTest {
         liveDetectionEnabled: Boolean = true,
         liveStatusBatchSize: Int = 50,
         maxConsecutiveLoginFailures: Int = 3,
+        requestBlockCooldownMinutes: Int = 30,
     ): BilibiliPublisherConfig {
         return BilibiliPublisherConfig(
             pollingIntervalSeconds = pollingIntervalSeconds,
@@ -1584,6 +1615,7 @@ class BilibiliPublisherPluginTest {
             liveDetectionEnabled = liveDetectionEnabled,
             liveStatusBatchSize = liveStatusBatchSize,
             maxConsecutiveLoginFailures = maxConsecutiveLoginFailures,
+            requestBlockCooldownMinutes = requestBlockCooldownMinutes,
         )
     }
 
@@ -1707,6 +1739,7 @@ class BilibiliPublisherPluginTest {
         initialGroups: List<BiliGroup> = emptyList(),
         initialLiveSnapshots: Map<Long, BilibiliLiveSnapshot> = emptyMap(),
         failingLiveBatches: Set<List<Long>> = emptySet(),
+        private val liveBatchFailure: Throwable? = null,
         private val liveBatchStarted: CompletableDeferred<Unit>? = null,
         private val liveBatchContinue: CompletableDeferred<Unit>? = null,
     ) : BilibiliPlatformGateway {
@@ -1780,7 +1813,7 @@ class BilibiliPublisherPluginTest {
             liveBatchStarted?.complete(Unit)
             liveBatchContinue?.await()
             if (requested in liveBatchFailures) {
-                error("live status failed: $requested")
+                throw liveBatchFailure ?: IllegalStateException("live status failed: $requested")
             }
             return requested.mapNotNull { liveSnapshots[it] }
         }
@@ -2189,6 +2222,7 @@ class BilibiliPublisherPluginTest {
 
     private class TestTaskScheduler(
         private val scope: CoroutineScope,
+        private val autoRun: Boolean = true,
     ) : TaskScheduler {
         private val tasks: MutableMap<String, TaskRuntime> = linkedMapOf()
 
@@ -2200,7 +2234,11 @@ class BilibiliPublisherPluginTest {
             runtime.status = TaskStatus.RUNNING
             runtime.job = scope.launch {
                 try {
-                    runTask(runtime)
+                    if (autoRun) {
+                        runTask(runtime)
+                    } else {
+                        kotlinx.coroutines.awaitCancellation()
+                    }
                     if (runtime.status == TaskStatus.RUNNING) {
                         runtime.status = TaskStatus.COMPLETED
                     }
