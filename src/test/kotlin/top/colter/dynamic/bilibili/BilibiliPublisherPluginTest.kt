@@ -566,6 +566,137 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `polling should stop publisher batch when source update publish fails`() = runBlocking {
+        val scheduler = testScheduler()
+        val cursorStore = InMemoryCursorStore()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+        )
+        var failedDynamicId = ""
+        val sourceUpdates = RecordingSourceUpdatePublisher(
+            resultForRequest = { request ->
+                if (request.update.key.externalId == failedDynamicId) {
+                    gateway.setDynamicPages(emptyMap())
+                    SourceUpdatePublishResult.failed("dispatch unavailable")
+                } else {
+                    SourceUpdatePublishResult.enqueued(1)
+                }
+            },
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(),
+            taskScheduler = scheduler,
+            cursorStore = cursorStore,
+        )
+
+        plugin.init(sourceUpdates)
+        plugin.start()
+        withTimeout(3_000) {
+            while ((scheduler.snapshot("bilibili-detect")?.runCount ?: 0L) == 0L) {
+                delay(10)
+            }
+        }
+
+        val seeded = seedPublisherAndSubscriber()
+        val subscription = seeded.subscription
+        val failedDynamic = buildDynamic(
+            epochSeconds = subscription.createdAtEpochSeconds + 1,
+            mid = seeded.publisher.externalId.toLong(),
+            name = seeded.publisher.name,
+            suffix = 11,
+        )
+        failedDynamicId = failedDynamic.id.toString()
+        val laterDynamic = buildDynamic(
+            epochSeconds = subscription.createdAtEpochSeconds + 2,
+            mid = seeded.publisher.externalId.toLong(),
+            name = seeded.publisher.name,
+            suffix = 12,
+        )
+        gateway.setDynamicPages(mapOf(1 to dynamicPage(false, laterDynamic, failedDynamic)))
+
+        plugin.onSubscriptionChanged(
+            SubscriptionChangedEvent(
+                changeType = SubscriptionChangeType.SUBSCRIBED,
+                subscription = subscription,
+                publisher = seeded.publisher,
+                subscriber = seeded.subscriber,
+                changedAtEpochSeconds = subscription.createdAtEpochSeconds,
+            )
+        )
+
+        val failedRequest = withTimeout(3_000) { sourceUpdates.receive() }
+        assertEquals(failedDynamic.id.toString(), failedRequest.update.key.externalId)
+        assertNull(withTimeoutOrNull(300) { sourceUpdates.receive() })
+        val marks = cursorStore.markedDynamicIds(seeded.publisher.id)
+        assertFalse(failedDynamic.id.toString() in marks)
+        assertFalse(laterDynamic.id.toString() in marks)
+
+        plugin.stop()
+    }
+
+    @Test
+    fun `replay should stop publisher batch when source update publish fails`() = runBlocking {
+        val now = System.currentTimeMillis() / 1000
+        val scheduler = testScheduler()
+        val cursorStore = InMemoryCursorStore()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            initialDynamicPages = emptyMap(),
+        )
+        val failedDynamicId = dynamicIdFor(now - 3_700L, 2)
+        val sourceUpdates = RecordingSourceUpdatePublisher(
+            resultForRequest = { request ->
+                if (request.update.key.externalId == failedDynamicId) {
+                    gateway.setDynamicPages(emptyMap())
+                    SourceUpdatePublishResult.failed("dispatch unavailable")
+                } else {
+                    SourceUpdatePublishResult.enqueued(1)
+                }
+            },
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(replayWindowMinutes = 120),
+            cursorStore = cursorStore,
+            taskScheduler = scheduler,
+        )
+
+        val seeded = seedPublisherAndSubscriber()
+        cursorStore.put(
+            seeded.publisher.id,
+            SourceCursor(
+                publisherId = seeded.publisher.id,
+                sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
+                eventType = SourceEventType.DYNAMIC_CREATED,
+                lastSeenUpdateKey = dynamicIdFor(now - 5_000L, 99),
+                lastSeenAtEpochSeconds = now - 5_000L,
+                recentUpdateKeys = emptyList(),
+            ),
+        )
+        val newer = buildDynamic(now - 3_600L, seeded.publisher.externalId.toLong(), "demo-up", 1)
+        val failed = buildDynamic(now - 3_700L, seeded.publisher.externalId.toLong(), "demo-up", 2)
+        gateway.setDynamicPages(mapOf(1 to dynamicPage(false, newer, failed)))
+
+        plugin.init(sourceUpdates)
+        plugin.start()
+        waitForTaskRun(scheduler)
+
+        val failedRequest = withTimeout(3_000) { sourceUpdates.receive() }
+        assertEquals(failed.id.toString(), failedRequest.update.key.externalId)
+        assertNull(withTimeoutOrNull(300) { sourceUpdates.receive() })
+        assertEquals(emptyList(), cursorStore.markedDynamicIds(seeded.publisher.id))
+
+        plugin.stop()
+    }
+
+    @Test
     fun `replay window should keep collected pages when later page fails`() {
         val now = System.currentTimeMillis() / 1000
         val scheduler = testScheduler()
@@ -1812,12 +1943,13 @@ class BilibiliPublisherPluginTest {
 
     private class RecordingSourceUpdatePublisher(
         private val result: SourceUpdatePublishResult = SourceUpdatePublishResult.enqueued(1),
+        private val resultForRequest: (SourceUpdatePublishRequest) -> SourceUpdatePublishResult = { result },
     ) : SourceUpdatePublisher {
         private val requests = Channel<SourceUpdatePublishRequest>(Channel.UNLIMITED)
 
         override suspend fun publish(request: SourceUpdatePublishRequest): SourceUpdatePublishResult {
             requests.send(request)
-            return result
+            return resultForRequest(request)
         }
 
         suspend fun receive(): SourceUpdatePublishRequest = requests.receive()

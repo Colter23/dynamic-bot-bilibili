@@ -467,22 +467,25 @@ internal class BilibiliPublisherRuntime() :
                 }
 
                 var cursor: SourceCursor = initialCursor
-                publisherDynamics
-                    .asReversed()
-                    .forEach dynamicLoop@{ raw ->
-                        val dynamicId = raw.id.toString()
-                        if (raw.time < cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) {
-                            return@dynamicLoop
-                        }
-
-                        val dynamic = mapper.map(raw, publisher) ?: return@dynamicLoop
-                        logger.info {
-                            "Bilibili 检测到新动态：publisher=${publisher.displayLabel()}，uid=$uid，dynamicId=$dynamicId，time=${raw.time}"
-                        }
-                        if (publishSourceUpdate(dynamic)) {
-                            cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
-                        }
+                for (raw in publisherDynamics.asReversed()) {
+                    val dynamicId = raw.id.toString()
+                    if (raw.time < cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) {
+                        continue
                     }
+
+                    val dynamic = mapper.map(raw, publisher) ?: continue
+                    logger.info {
+                        "Bilibili 检测到新动态：publisher=${publisher.displayLabel()}，uid=$uid，dynamicId=$dynamicId，time=${raw.time}"
+                    }
+                    if (publishSourceUpdate(dynamic)) {
+                        cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
+                    } else {
+                        logger.warn {
+                            "Bilibili 动态发布失败，已停止该发布者本轮后续处理，游标暂不越过失败动态：dynamicId=$dynamicId"
+                        }
+                        return@publisherLoop
+                    }
+                }
             }
         }
         if (requestFailureHandler.isPollingPaused() || startupLiveWarmupAttempted) return
@@ -873,7 +876,7 @@ internal class BilibiliPublisherRuntime() :
             }
 
         var replayedCount = 0
-        targets.forEach { target ->
+        targets.forEach targetLoop@{ target ->
             var cursor = target.cursor
             dynamicsByPublisher[target.userId].orEmpty().forEach dynamicLoop@{ raw ->
                 if (raw.time < target.lowerBound) return@dynamicLoop
@@ -887,6 +890,11 @@ internal class BilibiliPublisherRuntime() :
                 if (publishSourceUpdate(dynamic)) {
                     cursor = cursorStore.markSeen(target.publisher.id, dynamicId, raw.time)
                     replayedCount += 1
+                } else {
+                    logger.warn {
+                        "Bilibili 历史动态补发失败，已停止该发布者本轮补发，游标暂不越过失败动态：dynamicId=$dynamicId"
+                    }
+                    return@targetLoop
                 }
             }
         }
