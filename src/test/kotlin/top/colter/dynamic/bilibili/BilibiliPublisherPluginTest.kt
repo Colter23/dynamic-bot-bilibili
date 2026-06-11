@@ -509,6 +509,63 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `regular polling should not fetch deeper pages for stale cursors`() = runBlocking {
+        val now = System.currentTimeMillis() / 1000
+        val scheduler = testScheduler()
+        val cursorStore = InMemoryCursorStore()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            initialDynamicPages = emptyMap(),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(
+                pollingIntervalSeconds = 0.025,
+                liveDetectionEnabled = false,
+            ),
+            cursorStore = cursorStore,
+            taskScheduler = scheduler,
+        )
+
+        val seeded = seedPublisherAndSubscriber()
+        cursorStore.put(
+            seeded.publisher.id,
+            SourceCursor(
+                publisherId = seeded.publisher.id,
+                sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
+                eventType = SourceEventType.DYNAMIC_CREATED,
+                lastSeenUpdateKey = dynamicIdFor(now - 86_400L, 99),
+                lastSeenAtEpochSeconds = now - 86_400L,
+                recentUpdateKeys = emptyList(),
+            ),
+        )
+        val unrelated = buildDynamic(now, 999L, "other-up", 1)
+        val subscribedOnPage2 = buildDynamic(now - 1, seeded.publisher.externalId.toLong(), "demo-up", 2)
+        gateway.setDynamicPages(
+            mapOf(
+                1 to dynamicPage(true, unrelated),
+                2 to dynamicPage(false, subscribedOnPage2),
+            ),
+        )
+
+        plugin.init()
+        plugin.start()
+        withTimeout(3_000) {
+            while ((scheduler.snapshot("bilibili-detect")?.runCount ?: 0L) < 2L) {
+                delay(10)
+            }
+        }
+
+        assertTrue(gateway.requestedPages.all { it == 1 })
+        assertTrue(cursorStore.markedDynamicIds(seeded.publisher.id).isEmpty())
+
+        plugin.stop()
+    }
+
+    @Test
     fun `replay window should backfill missed dynamics in order when cursor exists`() {
         val now = System.currentTimeMillis() / 1000
         val scheduler = testScheduler()

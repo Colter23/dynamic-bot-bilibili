@@ -448,11 +448,7 @@ internal class BilibiliPublisherRuntime() :
 
         if (dynamicPublisherSnapshot.isNotEmpty()) {
             val start = System.currentTimeMillis()
-            // 全局动态流混合了所有关注 UP 主，单页可能放不下突发新动态，需按已有游标下界翻页。
-            val pollLowerBound = dynamicPublisherSnapshot.values
-                .mapNotNull { cursorStore.get(it.id)?.lastSeenAtEpochSeconds }
-                .minOrNull()
-            val followedDynamics = collectPolledDynamics(pollLowerBound)
+            val followedDynamics = collectPolledDynamics()
             val latency = System.currentTimeMillis() - start
             val dynamicsByPublisher = followedDynamics
                 .groupBy { it.mid }
@@ -502,33 +498,15 @@ internal class BilibiliPublisherRuntime() :
         detectLiveStatusChanges(livePublisherSnapshot)
     }
 
-    // 按页拉取全局动态流，直到翻过 lowerBound（已有游标的最早时间）或无更多页/到达页数上限。
-    // lowerBound 为 null（全部发布者均无游标）时只取首页，仅用于初始化游标。
-    private suspend fun collectPolledDynamics(lowerBound: Long?): List<BiliDynamic> {
-        val collected = mutableListOf<BiliDynamic>()
-        var page = 1
-        while (page <= MAX_POLL_PAGES) {
-            val pageFetch = runBilibiliRequest("动态轮询 page=$page") {
-                pollService.fetchNewDynamicPage(page)
-            }
-            if (pageFetch.isFailure) {
-                if (collected.isEmpty()) return emptyList()
-                logger.warn {
-                    "Bilibili 动态轮询分页提前停止：page=$page，已收集=${collected.size} 条；原因=${pageFetch.exceptionOrNull()?.message ?: "未知错误"}"
-                }
-                break
-            }
-            val pageResult = pageFetch.getOrThrow()
-            val items = pageResult.items
-            if (items.isEmpty()) break
-            collected.addAll(items)
-
-            if (lowerBound == null) break
-            val oldestTime = items.minOf { it.time }
-            if (!pageResult.hasMore || oldestTime < lowerBound) break
-            page += 1
+    // 常规轮询只取关注动态流首页，避免长期未更新的订阅游标把每轮检测拖入深分页。
+    // 需要补发历史动态时，使用 replayWindowMinutes 触发启动补发流程。
+    private suspend fun collectPolledDynamics(): List<BiliDynamic> {
+        val pageResult = runBilibiliRequest("动态轮询 page=1") {
+            pollService.fetchNewDynamicPage(1)
+        }.getOrElse {
+            return emptyList()
         }
-        return collected
+        return pageResult.items
     }
 
     private suspend fun bootstrapLoggedInState(allowReplay: Boolean): Boolean {
@@ -1230,7 +1208,6 @@ internal class BilibiliPublisherRuntime() :
     private companion object {
         private const val BILIBILI_HOME: String = "https://www.bilibili.com"
         private const val BILIBILI_LIVE_HOME: String = "https://live.bilibili.com"
-        private const val MAX_POLL_PAGES: Int = 5
         private val BILIBILI_PLATFORM: PlatformDescriptor = PlatformDescriptor.of(
             id = "bilibili",
             displayName = "Bilibili",
