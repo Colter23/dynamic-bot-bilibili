@@ -73,6 +73,7 @@ import top.colter.dynamic.core.task.TaskScheduler
 import top.colter.dynamic.core.task.TaskSnapshot
 import top.colter.dynamic.core.task.TaskStatus
 import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.io.path.createTempDirectory
 import kotlin.reflect.KClass
 import kotlin.test.Test
@@ -1807,17 +1808,17 @@ class BilibiliPublisherPluginTest {
         private val liveBatchFailures: MutableSet<List<Long>> = failingLiveBatches.map { it.toList() }.toMutableSet()
         private var nextGroupId: Long = (groups.maxOfOrNull { it.tid } ?: 0L) + 1L
 
-        val requestedPages: MutableList<Int> = mutableListOf()
-        val requestedLiveBatches: MutableList<List<Long>> = mutableListOf()
+        val requestedPages: MutableList<Int> = CopyOnWriteArrayList()
+        val requestedLiveBatches: MutableList<List<Long>> = CopyOnWriteArrayList()
         var groupFetchCount: Int = 0
             private set
-        val createdGroupNames: MutableList<String> = mutableListOf()
-        val addedGroupUsers: MutableList<GroupUsersCall> = mutableListOf()
-        val requestedDetails: MutableList<String> = mutableListOf()
-        val requestedVideos: MutableList<String> = mutableListOf()
-        val requestedLiveRooms: MutableList<String> = mutableListOf()
-        val expandedShortUrls: MutableList<String> = mutableListOf()
-        val unfollowedUsers: MutableList<String> = mutableListOf()
+        val createdGroupNames: MutableList<String> = CopyOnWriteArrayList()
+        val addedGroupUsers: MutableList<GroupUsersCall> = CopyOnWriteArrayList()
+        val requestedDetails: MutableList<String> = CopyOnWriteArrayList()
+        val requestedVideos: MutableList<String> = CopyOnWriteArrayList()
+        val requestedLiveRooms: MutableList<String> = CopyOnWriteArrayList()
+        val expandedShortUrls: MutableList<String> = CopyOnWriteArrayList()
+        val unfollowedUsers: MutableList<String> = CopyOnWriteArrayList()
         var closeCount: Int = 0
             private set
 

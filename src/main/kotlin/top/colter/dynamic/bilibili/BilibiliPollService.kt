@@ -15,6 +15,7 @@ import top.colter.bilibili.api.getGroupList
 import top.colter.bilibili.api.getUserInfo
 import top.colter.bilibili.api.getVideoDetail
 import top.colter.bilibili.api.modifyGroupUsers
+import top.colter.bilibili.api.probeVideoDownloadSize
 import top.colter.bilibili.api.createGroup
 import top.colter.bilibili.auth.qrCode
 import top.colter.bilibili.client.BiliAuthClient
@@ -110,7 +111,14 @@ internal data class BilibiliFollowRelationSnapshot(
 
 private class BilibiliVideoDownloadSizeExceededException(
     maxBytes: Long,
-) : BiliDownloadException("视频下载超过大小上限：maxBytes=$maxBytes")
+    sizeBytes: Long? = null,
+) : BiliDownloadException(
+    if (sizeBytes == null) {
+        "视频下载超过大小上限：maxBytes=$maxBytes"
+    } else {
+        "视频下载超过大小上限：sizeBytes=$sizeBytes，maxBytes=$maxBytes"
+    },
+)
 
 internal interface BilibiliPlatformGateway {
     fun close() {
@@ -315,29 +323,37 @@ internal class BilibiliPollService(
         cleanupVideoCacheFiles(directory, fileName)
         return try {
             val detail = client.getVideoDetail(aid = aid, bvid = bvid)
-            val result = client.downloadVideo(
-                directory = directory,
+            val quality = request.quality.toBiliClientQuality()
+            val probedSize = client.probeVideoDownloadSize(
                 aid = detail.aid,
                 bvid = detail.bvid,
+                cid = detail.cid,
+                quality = quality,
+            )
+            val totalBytes = probedSize.totalBytes
+                ?: throw BiliDownloadException("无法探测视频下载大小")
+            if (totalBytes > request.maxBytes) {
+                throw BilibiliVideoDownloadSizeExceededException(
+                    maxBytes = request.maxBytes,
+                    sizeBytes = totalBytes,
+                )
+            }
+            val result = client.downloadVideo(
+                playUrl = probedSize.playUrl,
+                directory = directory,
                 fileName = fileName,
+                aid = detail.aid,
+                bvid = detail.bvid,
                 ffmpegPath = request.ffmpegPath.trim().takeIf { it.isNotBlank() },
                 overwrite = true,
                 keepStreams = false,
-                quality = request.quality.toBiliClientQuality(),
-                onProgress = {
-                    if (directory.cacheBytes(fileName) > request.maxBytes) {
-                        throw BilibiliVideoDownloadSizeExceededException(request.maxBytes)
-                    }
-                },
+                quality = quality,
             )
             val finalFile = result.finalMp4File()
-            val size = finalFile.length()
-            if (size > request.maxBytes) {
-                throw BilibiliVideoDownloadSizeExceededException(request.maxBytes)
-            }
+            val finalSize = finalFile.length()
             LinkVideoDownloadResult(
                 video = MediaRef(finalFile.absolutePath, MediaKind.VIDEO, mimeType = "video/mp4"),
-                fileSizeBytes = size,
+                fileSizeBytes = finalSize,
                 title = detail.title,
                 durationSeconds = detail.duration.takeIf { it > 0 }?.toLong(),
             )
@@ -602,10 +618,6 @@ internal class BilibiliPollService(
         return replace(Regex("[^a-zA-Z0-9._-]+"), "_")
             .trim('_', '.', ' ')
             .ifBlank { "video" }
-    }
-
-    private fun File.cacheBytes(fileName: String): Long {
-        return cacheFiles(fileName).sumOf { file -> if (file.isFile) file.length() else 0L }
     }
 
     private fun cleanupVideoCacheFiles(directory: File, fileName: String) {
