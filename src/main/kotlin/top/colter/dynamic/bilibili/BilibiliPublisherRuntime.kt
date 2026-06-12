@@ -304,14 +304,31 @@ internal class BilibiliPublisherRuntime() :
         val snapshot = runBilibiliRequest("发布者资料查询 uid=$userId") {
             pollService.fetchPublisherSnapshot(userId)
         }.getOrNull() ?: return null
+        return snapshot.toPublisherInfo()
+    }
+
+    override suspend fun searchPublisherInfo(query: String, limit: Int): List<PublisherInfo> {
+        ensurePollServiceReady()
+        val searchText = query.trim()
+        if (searchText.isBlank()) return emptyList()
+        val snapshots = runBilibiliRequest("发布者搜索 keyword=$searchText") {
+            pollService.searchPublisherSnapshots(searchText, limit)
+        }.getOrNull().orEmpty()
+        return snapshots
+            .distinctBy { it.userId }
+            .take(limit.coerceAtLeast(1))
+            .map { it.toPublisherInfo() }
+    }
+
+    private fun BilibiliPublisherSnapshot.toPublisherInfo(): PublisherInfo {
         return PublisherInfo(
-            key = PublisherKey.of(platformId.value, PublisherKind.USER, snapshot.userId),
-            name = snapshot.name,
-            avatarBadgeKey = snapshot.avatarBadgeKey,
+            key = PublisherKey.of(platformId.value, PublisherKind.USER, userId),
+            name = name,
+            avatarBadgeKey = avatarBadgeKey,
             state = EntityState.ACTIVE,
-            avatar = MediaRef(snapshot.faceUrl, MediaKind.AVATAR),
-            banner = snapshot.headerUrl?.let { MediaRef(it, MediaKind.COVER) },
-            pendant = snapshot.pendantUrl?.let { MediaRef(it, MediaKind.AVATAR) },
+            avatar = MediaRef(faceUrl, MediaKind.AVATAR),
+            banner = headerUrl?.let { MediaRef(it, MediaKind.COVER) },
+            pendant = pendantUrl?.let { MediaRef(it, MediaKind.AVATAR) },
         )
     }
 

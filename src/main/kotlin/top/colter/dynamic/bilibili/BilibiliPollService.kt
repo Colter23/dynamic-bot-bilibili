@@ -26,6 +26,8 @@ import top.colter.bilibili.data.dynamic.BiliDynamicList
 import top.colter.bilibili.data.login.QrCodeLoginData
 import top.colter.bilibili.data.login.QrCodeLoginResult
 import top.colter.bilibili.data.login.QrCodeLoginStatus
+import top.colter.bilibili.data.search.UserSearchOrder
+import top.colter.bilibili.data.search.UserType
 import top.colter.bilibili.data.user.BiliGroup
 import top.colter.bilibili.data.video.BiliVideo
 import top.colter.bilibili.data.video.BiliVideoDownloadResult
@@ -47,6 +49,7 @@ import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
 import kotlinx.coroutines.CancellationException
 import top.colter.bilibili.api.relation
+import top.colter.bilibili.api.searchUser
 import top.colter.bilibili.api.unfollow
 import top.colter.bilibili.data.user.BiliUserInfo
 import java.io.File
@@ -137,6 +140,10 @@ internal interface BilibiliPlatformGateway {
     }
 
     suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot?
+
+    suspend fun searchPublisherSnapshots(query: String, limit: Int = 10): List<BilibiliPublisherSnapshot> {
+        return fetchPublisherSnapshot(query)?.let(::listOf).orEmpty()
+    }
 
     suspend fun fetchVideoSnapshot(videoId: String): BilibiliVideoSnapshot? {
         throw UnsupportedOperationException("不支持获取视频详情")
@@ -286,6 +293,38 @@ internal class BilibiliPollService(
             headerUrl = info.header?.image?.url,
             pendantUrl = info.pendant?.image?.url?.takeIf { it.isNotBlank() },
         )
+    }
+
+    override suspend fun searchPublisherSnapshots(query: String, limit: Int): List<BilibiliPublisherSnapshot> {
+        val keyword = query.trim()
+        if (keyword.isBlank()) return emptyList()
+        if (keyword.toLongOrNull() != null) {
+            return fetchPublisherSnapshot(keyword)?.let(::listOf).orEmpty()
+        }
+
+        val boundedLimit = limit.coerceAtLeast(1)
+        val response = callWithRequestDelay {
+            client.searchUser(
+                keyword = keyword,
+                page = 1,
+                order = UserSearchOrder.FANS,
+                userType = UserType.UP,
+            )
+        }
+        return response.result
+            .asSequence()
+            .filter { it.mid > 0 }
+            .distinctBy { it.mid }
+            .take(boundedLimit)
+            .map { user ->
+                BilibiliPublisherSnapshot(
+                    userId = user.mid.toString(),
+                    name = user.name,
+                    avatarBadgeKey = user.official.toAvatarBadgeKey(),
+                    faceUrl = user.face.fullUrl,
+                )
+            }
+            .toList()
     }
 
     override suspend fun fetchVideoSnapshot(videoId: String): BilibiliVideoSnapshot? {

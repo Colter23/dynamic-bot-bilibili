@@ -167,6 +167,37 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `searchPublisherInfo should map gateway search snapshots`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            searchSnapshots = listOf(
+                BilibiliPublisherSnapshot(
+                    userId = "123",
+                    name = "demo-up-1",
+                    avatarBadgeKey = "avatarBadge.official.individual",
+                    faceUrl = "https://example.com/123.png",
+                ),
+                BilibiliPublisherSnapshot(
+                    userId = "456",
+                    name = "demo-up-2",
+                    faceUrl = "https://example.com/456.png",
+                ),
+            ),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val results = plugin.searchPublisherInfo("demo", limit = 10)
+
+        assertEquals(listOf("123", "456"), results.map { it.externalId })
+        assertEquals(listOf("demo-up-1", "demo-up-2"), results.map { it.name })
+        assertEquals("avatarBadge.official.individual", results.first().avatarBadgeKey)
+        assertEquals(listOf("demo" to 10), gateway.searchedPublishers)
+    }
+
+    @Test
     fun `queryFollowState should delegate to gateway`() = runBlocking {
         val gateway = FakeGateway(
             snapshot = null,
@@ -1785,6 +1816,7 @@ class BilibiliPublisherPluginTest {
         private val shortUrlExpansions: Map<String, String?> = emptyMap(),
         private val videoSnapshots: Map<String, BilibiliVideoSnapshot> = emptyMap(),
         private val liveRoomSnapshots: Map<String, BilibiliLiveRoomSnapshot> = emptyMap(),
+        private val searchSnapshots: List<BilibiliPublisherSnapshot> = emptyList(),
         private val followRelation: BilibiliFollowRelationSnapshot? = null,
         private val relationFailure: Throwable? = null,
         private val unfollowActionResult: FollowActionResult = FollowActionResult(
@@ -1818,6 +1850,7 @@ class BilibiliPublisherPluginTest {
         val requestedVideos: MutableList<String> = CopyOnWriteArrayList()
         val requestedLiveRooms: MutableList<String> = CopyOnWriteArrayList()
         val expandedShortUrls: MutableList<String> = CopyOnWriteArrayList()
+        val searchedPublishers: MutableList<Pair<String, Int>> = CopyOnWriteArrayList()
         val unfollowedUsers: MutableList<String> = CopyOnWriteArrayList()
         var closeCount: Int = 0
             private set
@@ -1892,6 +1925,11 @@ class BilibiliPublisherPluginTest {
         }
 
         override suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot? = snapshot
+
+        override suspend fun searchPublisherSnapshots(query: String, limit: Int): List<BilibiliPublisherSnapshot> {
+            searchedPublishers.add(query to limit)
+            return searchSnapshots.take(limit)
+        }
 
         override suspend fun queryFollowState(userId: String): FollowState = followState
 

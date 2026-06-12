@@ -102,6 +102,10 @@ public class BilibiliPublisherPlugin private constructor(
         return runtime.fetchPublisherInfo(userId)
     }
 
+    override suspend fun searchPublisherInfo(query: String, limit: Int): List<PublisherInfo> {
+        return runtime.searchPublisherInfo(query, limit)
+    }
+
     override suspend fun queryFollowState(userId: String): FollowState {
         return runtime.queryFollowState(userId)
     }
