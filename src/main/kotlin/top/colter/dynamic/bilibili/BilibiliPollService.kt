@@ -300,7 +300,7 @@ internal class BilibiliPollService(
     override suspend fun downloadVideoLink(request: LinkVideoDownloadRequest): LinkVideoDownloadResult {
         val normalized = request.parsedLink.targetId.trim()
         require(normalized.isNotBlank()) { "视频 ID 不能为空" }
-        require(request.maxBytes > 0) { "视频大小上限必须大于 0" }
+        require(request.maxBytes >= 0) { "视频大小上限不能为负数" }
 
         val aid = normalized.removePrefix("av").removePrefix("AV").toLongOrNull()
         val bvid = normalized.takeIf { it.startsWith("BV", ignoreCase = true) }
@@ -311,7 +311,7 @@ internal class BilibiliPollService(
         val cachedFile = directory.resolve("$fileName.mp4")
         if (cachedFile.isFile) {
             val cachedSize = cachedFile.length()
-            if (cachedSize <= request.maxBytes) {
+            if (request.maxBytes <= 0 || cachedSize <= request.maxBytes) {
                 return LinkVideoDownloadResult(
                     video = MediaRef(cachedFile.absolutePath, MediaKind.VIDEO, mimeType = "video/mp4"),
                     fileSizeBytes = cachedSize,
@@ -330,13 +330,15 @@ internal class BilibiliPollService(
                 cid = detail.cid,
                 quality = quality,
             )
-            val totalBytes = probedSize.totalBytes
-                ?: throw BiliDownloadException("无法探测视频下载大小")
-            if (totalBytes > request.maxBytes) {
-                throw BilibiliVideoDownloadSizeExceededException(
-                    maxBytes = request.maxBytes,
-                    sizeBytes = totalBytes,
-                )
+            if (request.maxBytes > 0) {
+                val totalBytes = probedSize.totalBytes
+                    ?: throw BiliDownloadException("无法探测视频下载大小")
+                if (totalBytes > request.maxBytes) {
+                    throw BilibiliVideoDownloadSizeExceededException(
+                        maxBytes = request.maxBytes,
+                        sizeBytes = totalBytes,
+                    )
+                }
             }
             val result = client.downloadVideo(
                 playUrl = probedSize.playUrl,
