@@ -18,6 +18,33 @@ class BilibiliPublisherConfigFormTest {
     }
 
     @Test
+    fun `form should group fields by user scenario`() {
+        val sections = BilibiliPublisherConfigForm.spec.fields.groupBy { it.section }
+
+        assertEquals(
+            setOf("轮询与风控", "动态与直播", "关注与链接"),
+            sections.keys,
+        )
+        assertEquals(
+            listOf(
+                "pollingIntervalSeconds",
+                "requestIntervalSeconds",
+                "maxConsecutiveLoginFailures",
+                "requestBlockCooldownMinutes",
+            ),
+            sections.getValue("轮询与风控").map { it.path },
+        )
+        assertEquals(
+            listOf("liveDetectionEnabled", "liveStatusBatchSize", "replayWindowMinutes"),
+            sections.getValue("动态与直播").map { it.path },
+        )
+        assertEquals(
+            listOf("followGroupName", "shortUrlResolveTimeoutSeconds"),
+            sections.getValue("关注与链接").map { it.path },
+        )
+    }
+
+    @Test
     fun `validator should reject invalid polling values`() {
         BilibiliPublisherConfigForm.validate(BilibiliPublisherConfig())
 
