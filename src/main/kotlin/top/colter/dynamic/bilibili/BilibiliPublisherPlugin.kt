@@ -110,8 +110,16 @@ public class BilibiliPublisherPlugin private constructor(
         return runtime.queryFollowState(userId)
     }
 
+    override suspend fun queryFollowStates(userIds: Collection<String>): Map<String, FollowState> {
+        return runtime.queryFollowStates(userIds)
+    }
+
     override suspend fun followPublisher(userId: String): FollowActionResult {
         return runtime.followPublisher(userId)
+    }
+
+    override suspend fun followPublishers(userIds: Collection<String>): Map<String, FollowActionResult> {
+        return runtime.followPublishers(userIds)
     }
 
     override suspend fun unfollowPublisher(userId: String): FollowActionResult {

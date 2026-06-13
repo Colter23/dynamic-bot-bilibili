@@ -213,19 +213,71 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
-    fun `followPublisher should delegate to gateway`() = runBlocking {
+    fun `queryFollowStates should mark missing relations as unsupported`() = runBlocking {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.NOT_FOLLOWING,
-            followActionResult = FollowActionResult(FollowActionStatus.FAILED, "follow failed"),
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            followRelations = mapOf(
+                "123" to BilibiliFollowRelationSnapshot("123", following = false, tagIds = emptySet()),
+            ),
+            missingFollowRelationIds = setOf("456"),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val states = plugin.queryFollowStates(listOf("123", "456"))
+
+        assertEquals(FollowState.NOT_FOLLOWING, states["123"])
+        assertEquals(FollowState.UNSUPPORTED, states["456"])
+        assertEquals(listOf(listOf("123", "456")), gateway.requestedRelationBatches)
+    }
+
+    @Test
+    fun `followPublisher should query relation and use batch follow`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.NOT_FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
         )
         val plugin = testPlugin(gateway)
         plugin.init()
 
         val result = plugin.followPublisher("123")
 
-        assertEquals(FollowActionStatus.FAILED, result.status)
-        assertEquals("follow failed", result.message)
+        assertEquals(FollowActionStatus.DONE, result.status)
+        assertEquals(listOf(listOf("123")), gateway.requestedRelationBatches)
+        assertEquals(listOf(listOf("123")), gateway.followedUserBatches)
+    }
+
+    @Test
+    fun `followPublishers should skip already followed users`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.NOT_FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
+            followRelations = mapOf(
+                "123" to BilibiliFollowRelationSnapshot("123", following = true, tagIds = emptySet()),
+                "456" to BilibiliFollowRelationSnapshot("456", following = false, tagIds = emptySet()),
+            ),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(followGroupName = "Bot关注"),
+        )
+        plugin.init()
+
+        val results = plugin.followPublishers(listOf("123", "456"))
+
+        assertEquals(FollowActionStatus.NOOP, results["123"]?.status)
+        assertEquals(FollowActionStatus.DONE, results["456"]?.status)
+        assertEquals(listOf(listOf("123", "456")), gateway.requestedRelationBatches)
+        assertEquals(listOf(listOf("456")), gateway.followedUserBatches)
+        assertEquals(
+            listOf(GroupUsersCall(listOf(123L, 456L), listOf(1L))),
+            gateway.addedGroupUsers,
+        )
     }
 
     @Test
@@ -1156,10 +1208,45 @@ class BilibiliPublisherPluginTest {
 
         plugin.start()
         assertTrue(scheduler.isRunning("bilibili-detect"))
+        assertTrue(scheduler.isRunning("bilibili-maintenance"))
 
         plugin.stop()
         assertFalse(scheduler.isRunning("bilibili-detect"))
+        assertFalse(scheduler.isRunning("bilibili-maintenance"))
         assertEquals(TaskStatus.CANCELLED, scheduler.snapshot("bilibili-detect")?.status)
+        assertEquals(TaskStatus.CANCELLED, scheduler.snapshot("bilibili-maintenance")?.status)
+    }
+
+    @Test
+    fun `daily maintenance should refresh homepage and batch follow subscribed publishers`() = runBlocking {
+        val scheduler = testScheduler(autoRun = false) as TestTaskScheduler
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.NOT_FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            followRelations = mapOf(
+                "101" to BilibiliFollowRelationSnapshot("101", following = true, tagIds = emptySet()),
+                "102" to BilibiliFollowRelationSnapshot("102", following = false, tagIds = emptySet()),
+            ),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(),
+            taskScheduler = scheduler,
+        )
+        seedPublisherAndSubscriber(externalId = "101", targetId = "9001")
+        seedPublisherAndSubscriber(externalId = "102", targetId = "9002", policy = livePolicy())
+
+        plugin.init()
+        plugin.start()
+        scheduler.runNow("bilibili-maintenance")
+
+        assertEquals(1, gateway.refreshedHomeCount)
+        assertEquals(listOf(listOf("101", "102")), gateway.requestedRelationBatches)
+        assertEquals(listOf(listOf("102")), gateway.followedUserBatches)
+
+        plugin.stop()
     }
 
     @Test
@@ -1818,6 +1905,8 @@ class BilibiliPublisherPluginTest {
         private val liveRoomSnapshots: Map<String, BilibiliLiveRoomSnapshot> = emptyMap(),
         private val searchSnapshots: List<BilibiliPublisherSnapshot> = emptyList(),
         private val followRelation: BilibiliFollowRelationSnapshot? = null,
+        private val followRelations: Map<String, BilibiliFollowRelationSnapshot> = emptyMap(),
+        private val missingFollowRelationIds: Set<String> = emptySet(),
         private val relationFailure: Throwable? = null,
         private val unfollowActionResult: FollowActionResult = FollowActionResult(
             FollowActionStatus.DONE,
@@ -1852,6 +1941,10 @@ class BilibiliPublisherPluginTest {
         val expandedShortUrls: MutableList<String> = CopyOnWriteArrayList()
         val searchedPublishers: MutableList<Pair<String, Int>> = CopyOnWriteArrayList()
         val unfollowedUsers: MutableList<String> = CopyOnWriteArrayList()
+        val requestedRelationBatches: MutableList<List<String>> = CopyOnWriteArrayList()
+        val followedUserBatches: MutableList<List<String>> = CopyOnWriteArrayList()
+        var refreshedHomeCount: Int = 0
+            private set
         var closeCount: Int = 0
             private set
 
@@ -1944,6 +2037,25 @@ class BilibiliPublisherPluginTest {
             )
         }
 
+        override suspend fun fetchFollowRelations(userIds: Collection<String>): Map<String, BilibiliFollowRelationSnapshot> {
+            val requested = userIds.toList()
+            requestedRelationBatches.add(requested)
+            relationFailure?.let { throw it }
+            return requested.mapNotNull { userId ->
+                if (userId in missingFollowRelationIds) return@mapNotNull null
+                userId to (followRelations[userId] ?: BilibiliFollowRelationSnapshot(
+                    userId = userId,
+                    following = followState == FollowState.FOLLOWING,
+                    tagIds = emptySet(),
+                ))
+            }.toMap()
+        }
+
+        override suspend fun followPublishers(userIds: Collection<String>): FollowActionResult {
+            followedUserBatches.add(userIds.toList())
+            return followActionResult
+        }
+
         override suspend fun unfollowPublisher(userId: String): FollowActionResult {
             unfollowedUsers.add(userId)
             return unfollowActionResult
@@ -1979,6 +2091,10 @@ class BilibiliPublisherPluginTest {
         }
 
         override fun exportCookiesJson(): String = exportedCookiesJson
+
+        override suspend fun refreshCookieSession() {
+            refreshedHomeCount += 1
+        }
     }
 
     private class FakeQrLoginGateway(
@@ -2382,6 +2498,11 @@ class BilibiliPublisherPluginTest {
         override fun snapshot(id: String): TaskSnapshot? = tasks[id]?.snapshot()
 
         override fun snapshots(): List<TaskSnapshot> = tasks.values.map { it.snapshot() }.sortedBy { it.id }
+
+        suspend fun runNow(id: String) {
+            val runtime = tasks[id] ?: error("task not found: $id")
+            runRound(runtime)
+        }
 
         private suspend fun runTask(runtime: TaskRuntime) {
             when (val schedule = runtime.definition.schedule) {

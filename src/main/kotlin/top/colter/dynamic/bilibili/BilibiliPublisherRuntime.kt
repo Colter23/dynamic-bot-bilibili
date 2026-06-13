@@ -42,6 +42,7 @@ import top.colter.dynamic.core.link.LinkVideoDownloadResult
 import top.colter.dynamic.core.link.LinkVideoDownloader
 import top.colter.dynamic.core.link.ParsedLink
 import top.colter.dynamic.core.plugin.FollowActionResult
+import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
 import top.colter.dynamic.core.plugin.PluginContext
 import top.colter.dynamic.core.plugin.PublisherFollowPlugin
@@ -57,6 +58,7 @@ import top.colter.dynamic.core.task.TaskDefinition
 import top.colter.dynamic.core.task.TaskSchedule
 import top.colter.dynamic.core.task.TaskScheduler
 import top.colter.dynamic.core.tools.loggerFor
+import java.time.ZoneId
 import kotlin.math.roundToLong
 import kotlin.time.Duration.Companion.seconds
 
@@ -72,6 +74,7 @@ internal class BilibiliPublisherRuntime() :
     ConfigurablePlugin<BilibiliPublisherConfig> {
     private var pluginId: String = "bilibili-publisher"
     private val detectTaskId: String = "bilibili-detect"
+    private val maintenanceTaskId: String = "bilibili-maintenance"
 
     override val platformId: PlatformId = PlatformId.of("bilibili")
     override val platformDescriptor: PlatformDescriptor = BILIBILI_PLATFORM
@@ -117,6 +120,7 @@ internal class BilibiliPublisherRuntime() :
     private lateinit var cursorStore: BilibiliCursorStore
     private lateinit var liveStatusStore: BilibiliLiveStatusStore
     private lateinit var detectTask: TaskDefinition
+    private lateinit var maintenanceTask: TaskDefinition
 
     @Volatile
     private var pollServiceClosed: Boolean = false
@@ -210,6 +214,15 @@ internal class BilibiliPublisherRuntime() :
                 detectAndPublish()
             },
         )
+        maintenanceTask = TaskDefinition(
+            id = maintenanceTaskId,
+            name = "Bilibili 账号维护",
+            description = "每天刷新 Bilibili Cookie，并检查已订阅 UP 主是否仍处于关注状态。",
+            schedule = TaskSchedule.Cron(DAILY_MAINTENANCE_CRON, ZoneId.systemDefault()),
+            action = {
+                runDailyMaintenance()
+            },
+        )
 
         importStoredCookies()
         loadActivePublishers()
@@ -251,6 +264,7 @@ internal class BilibiliPublisherRuntime() :
 
     override suspend fun onStop() {
         taskScheduler.stop(detectTaskId)
+        taskScheduler.stop(maintenanceTaskId)
         closePollService("stop")
         logger.info { "Bilibili 轮询已停止" }
     }
@@ -337,9 +351,19 @@ internal class BilibiliPublisherRuntime() :
         return followService.queryFollowState(userId)
     }
 
+    override suspend fun queryFollowStates(userIds: Collection<String>): Map<String, FollowState> {
+        ensurePollServiceReady()
+        return followService.queryFollowStates(userIds)
+    }
+
     override suspend fun followPublisher(userId: String): FollowActionResult {
         ensurePollServiceReady()
         return followService.followPublisher(userId)
+    }
+
+    override suspend fun followPublishers(userIds: Collection<String>): Map<String, FollowActionResult> {
+        ensurePollServiceReady()
+        return followService.followPublishers(userIds)
     }
 
     override suspend fun unfollowPublisher(userId: String): FollowActionResult {
@@ -529,6 +553,7 @@ internal class BilibiliPublisherRuntime() :
     private suspend fun bootstrapLoggedInState(allowReplay: Boolean): Boolean {
         loadActivePublishers()
         scheduleStartupBootstrap(allowReplay)
+        startMaintenanceTask()
         return startDetectionTask()
     }
 
@@ -600,6 +625,51 @@ internal class BilibiliPublisherRuntime() :
                 }
         }
         return plan.warmUpLiveStatuses
+    }
+
+    private suspend fun runDailyMaintenance() {
+        if (::requestFailureHandler.isInitialized && requestFailureHandler.isPollingPaused()) {
+            logger.debug { "Bilibili 账号维护跳过：轮询请求已暂停" }
+            return
+        }
+        ensurePollServiceReady()
+        runBilibiliRequest("每日刷新 Bilibili 首页 Cookie") {
+            pollService.refreshCookieSession()
+        }.onFailure {
+            logger.warn { "Bilibili 每日 Cookie 刷新失败：${it.message ?: "未知错误"}" }
+        }
+        if (requestFailureHandler.isPollingPaused()) {
+            persistRuntimeCookiesIfChanged()
+            return
+        }
+
+        loadActivePublishers(logSummary = false)
+        val ids = (dynamicPublishers.values.asSequence() + livePublishers.values.asSequence())
+            .map { it.externalId }
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .toList()
+        if (ids.isEmpty()) {
+            persistRuntimeCookiesIfChanged()
+            return
+        }
+
+        val results = followService.followPublishers(ids)
+        val done = results.count { (_, result) -> result.status == FollowActionStatus.DONE }
+        val failed = results.count { (_, result) -> result.status == FollowActionStatus.FAILED }
+        val unsupported = results.count { (_, result) -> result.status == FollowActionStatus.UNSUPPORTED }
+        val noops = results.count { (_, result) -> result.status == FollowActionStatus.NOOP }
+        if (done > 0 || failed > 0 || unsupported > 0) {
+            logger.info {
+                "Bilibili 每日关注巡检完成：订阅UP=${ids.size}，补关注=$done，已关注=$noops，失败=$failed，不支持=$unsupported"
+            }
+        } else {
+            logger.debug {
+                "Bilibili 每日关注巡检完成：订阅UP=${ids.size}，均已关注"
+            }
+        }
+        persistRuntimeCookiesIfChanged()
     }
 
     private suspend fun warmUpExistingCursors() {
@@ -1160,6 +1230,16 @@ internal class BilibiliPublisherRuntime() :
         return started
     }
 
+    private fun startMaintenanceTask(): Boolean {
+        val started = taskScheduler.start(maintenanceTask)
+        if (started) {
+            logger.info { "Bilibili 账号维护任务已启动：taskId=$maintenanceTaskId" }
+        } else {
+            logger.debug { "Bilibili 账号维护任务已在运行：taskId=$maintenanceTaskId" }
+        }
+        return started
+    }
+
     private fun Publisher.displayLabel(): String {
         return name.takeIf { it.isNotBlank() } ?: externalId
     }
@@ -1225,6 +1305,7 @@ internal class BilibiliPublisherRuntime() :
     private companion object {
         private const val BILIBILI_HOME: String = "https://www.bilibili.com"
         private const val BILIBILI_LIVE_HOME: String = "https://live.bilibili.com"
+        private const val DAILY_MAINTENANCE_CRON: String = "20 4 * * *"
         private val BILIBILI_PLATFORM: PlatformDescriptor = PlatformDescriptor.of(
             id = "bilibili",
             displayName = "Bilibili",

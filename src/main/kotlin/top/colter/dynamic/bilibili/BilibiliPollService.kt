@@ -48,7 +48,10 @@ import top.colter.dynamic.core.data.LiveStatus
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
 import kotlinx.coroutines.CancellationException
+import top.colter.bilibili.api.FollowAction
+import top.colter.bilibili.api.modifyFollowBatch
 import top.colter.bilibili.api.relation
+import top.colter.bilibili.api.relations
 import top.colter.bilibili.api.searchUser
 import top.colter.bilibili.api.unfollow
 import top.colter.bilibili.data.user.BiliUserInfo
@@ -169,11 +172,27 @@ internal interface BilibiliPlatformGateway {
         throw UnsupportedOperationException("不支持关注关系接口")
     }
 
+    suspend fun fetchFollowRelations(userIds: Collection<String>): Map<String, BilibiliFollowRelationSnapshot> {
+        return userIds.distinct().mapNotNull { userId ->
+            val relation = fetchFollowRelation(userId) ?: return@mapNotNull null
+            userId to relation
+        }.toMap()
+    }
+
     suspend fun unfollowPublisher(userId: String): FollowActionResult {
         return FollowActionResult(
             status = FollowActionStatus.UNSUPPORTED,
             message = "不支持取消关注",
         )
+    }
+
+    suspend fun followPublishers(userIds: Collection<String>): FollowActionResult {
+        val ids = userIds.distinct()
+        return when {
+            ids.isEmpty() -> FollowActionResult(FollowActionStatus.NOOP)
+            ids.size == 1 -> followPublisher(ids.single())
+            else -> FollowActionResult(FollowActionStatus.UNSUPPORTED, "不支持批量关注")
+        }
     }
 
     suspend fun fetchFollowGroups(): List<BiliGroup> {
@@ -215,6 +234,9 @@ internal interface BilibiliPlatformGateway {
             status = PublisherLoginStatus.UNSUPPORTED,
             message = "不支持二维码登录",
         )
+    }
+
+    suspend fun refreshCookieSession() {
     }
 }
 
@@ -478,6 +500,27 @@ internal class BilibiliPollService(
         )
     }
 
+    override suspend fun fetchFollowRelations(userIds: Collection<String>): Map<String, BilibiliFollowRelationSnapshot> {
+        val uidByText = userIds
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .mapNotNull { text -> text.toLongOrNull()?.let { uid -> text to uid } }
+            .toList()
+        if (uidByText.isEmpty()) return emptyMap()
+
+        val relations = callWithRequestDelay { client.relations(uidByText.map { it.second }) }
+        return uidByText.mapNotNull { (text, uid) ->
+            val relation = relations[uid] ?: return@mapNotNull null
+            text to BilibiliFollowRelationSnapshot(
+                userId = relation.mid.takeIf { it > 0 }?.toString() ?: uid.toString(),
+                following = relation.attribute.isFollowingRelation(),
+                tagIds = relation.tag.orEmpty().map { it.toLong() }.toSet(),
+            )
+        }.toMap()
+    }
+
     override suspend fun followPublisher(userId: String): FollowActionResult {
         return when (queryFollowState(userId)) {
             FollowState.FOLLOWING -> FollowActionResult(FollowActionStatus.NOOP)
@@ -492,6 +535,20 @@ internal class BilibiliPollService(
                 FollowActionResult(FollowActionStatus.DONE)
             }
         }
+    }
+
+    override suspend fun followPublishers(userIds: Collection<String>): FollowActionResult {
+        val mids = userIds
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .mapNotNull { it.toLongOrNull() }
+            .toList()
+        if (mids.isEmpty()) return FollowActionResult(FollowActionStatus.NOOP)
+
+        callWithRequestDelay { client.modifyFollowBatch(mids, FollowAction.FOLLOW) }
+        return FollowActionResult(FollowActionStatus.DONE)
     }
 
     override suspend fun unfollowPublisher(userId: String): FollowActionResult {
@@ -517,6 +574,10 @@ internal class BilibiliPollService(
 
     override suspend fun addUsersToFollowGroup(fids: Iterable<Long>, tagIds: Iterable<Long>) {
         callWithRequestDelay { client.modifyGroupUsers(fids, tagIds) }
+    }
+
+    override suspend fun refreshCookieSession() {
+        callWithRequestDelay { client.getString(BILIBILI_HOME) }
     }
 
     override suspend fun checkLoginState(): PublisherLoginResult {
@@ -808,6 +869,7 @@ internal class BilibiliPollService(
     private companion object {
         private const val DEFAULT_COOKIE_DOMAIN: String = ".bilibili.com"
         private const val DEFAULT_COOKIE_PATH: String = "/"
+        private const val BILIBILI_HOME: String = "https://www.bilibili.com"
         private const val QR_EXPIRES_SECONDS: Long = 180
         private const val MAX_SHORT_URL_REDIRECTS: Int = 5
         private const val USER_AGENT: String = "dynamic-bot/0.0.3"

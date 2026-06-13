@@ -33,19 +33,108 @@ internal class BilibiliFollowService(
         }.getOrElse { FollowState.UNSUPPORTED }
     }
 
+    suspend fun queryFollowStates(userIds: Collection<String>): Map<String, FollowState> {
+        val ids = normalizeUserIds(userIds)
+        if (ids.isEmpty()) return emptyMap()
+        return requestFailureHandler.run("批量关注状态查询 count=${ids.size}") {
+            val relations = gateway.fetchFollowRelations(ids)
+            ids.associateWith { userId ->
+                val relation = relations[userId]
+                when {
+                    relation == null -> FollowState.UNSUPPORTED
+                    relation.following -> FollowState.FOLLOWING
+                    else -> FollowState.NOT_FOLLOWING
+                }
+            }
+        }.getOrElse {
+            ids.associateWith { FollowState.UNSUPPORTED }
+        }
+    }
+
     suspend fun followPublisher(userId: String): FollowActionResult {
-        val result = requestFailureHandler.run("关注发布者 uid=$userId") {
-            gateway.followPublisher(userId)
+        val normalized = userId.trim()
+        if (normalized.isBlank()) {
+            return FollowActionResult(FollowActionStatus.FAILED, "Bilibili 用户 ID 不能为空")
+        }
+        return followPublishers(listOf(normalized))[normalized]
+            ?: FollowActionResult(FollowActionStatus.FAILED, "Bilibili 关注失败")
+    }
+
+    suspend fun followPublishers(userIds: Collection<String>): Map<String, FollowActionResult> {
+        val ids = normalizeUserIds(userIds)
+        if (ids.isEmpty()) return emptyMap()
+
+        val relations = requestFailureHandler.run("批量关注状态查询 count=${ids.size}") {
+            gateway.fetchFollowRelations(ids)
         }.getOrElse { error ->
-            return FollowActionResult(
+            return ids.associateWith {
+                FollowActionResult(
+                    FollowActionStatus.FAILED,
+                    error.message ?: "Bilibili 关注状态查询失败",
+                )
+            }
+        }
+
+        val invalidIds = ids.filterNot { it.toLongOrNull() != null }
+        val missingRelations = ids.filter { it !in relations && it !in invalidIds }
+        val toFollow = ids.filter { userId ->
+            userId !in invalidIds && relations[userId]?.following == false
+        }
+        val alreadyFollowing = ids.filter { relations[it]?.following == true }
+        val results = linkedMapOf<String, FollowActionResult>()
+        alreadyFollowing.forEach { userId ->
+            results[userId] = FollowActionResult(FollowActionStatus.NOOP)
+        }
+        invalidIds.forEach { userId ->
+            results[userId] = FollowActionResult(
                 FollowActionStatus.FAILED,
-                error.message ?: "Bilibili 关注失败",
+                "无效的 Bilibili 用户 ID：$userId",
             )
         }
-        if (result.status == FollowActionStatus.DONE || result.status == FollowActionStatus.NOOP) {
-            addPublisherToFollowGroup(userId)
+
+        val groupCandidates = alreadyFollowing.toMutableList()
+        if (toFollow.isNotEmpty()) {
+            val result = requestFailureHandler.run("批量关注发布者 count=${toFollow.size}") {
+                gateway.followPublishers(toFollow)
+            }.getOrElse { error ->
+                return ids.associateWith { userId ->
+                    results[userId] ?: FollowActionResult(
+                        FollowActionStatus.FAILED,
+                        error.message ?: "Bilibili 批量关注失败",
+                    )
+                }
+            }
+            toFollow.forEach { userId ->
+                results[userId] = when (result.status) {
+                    FollowActionStatus.DONE,
+                    FollowActionStatus.NOOP -> FollowActionResult(FollowActionStatus.DONE)
+                    FollowActionStatus.FAILED -> FollowActionResult(
+                        FollowActionStatus.FAILED,
+                        result.message ?: "Bilibili 关注失败",
+                    )
+                    FollowActionStatus.UNSUPPORTED -> FollowActionResult(
+                        FollowActionStatus.UNSUPPORTED,
+                        result.message ?: "Bilibili 不支持批量关注",
+                    )
+                }
+            }
+            if (result.status == FollowActionStatus.DONE || result.status == FollowActionStatus.NOOP) {
+                groupCandidates += toFollow
+            }
         }
-        return result
+        if (groupCandidates.isNotEmpty()) {
+            addPublishersToFollowGroup(groupCandidates)
+        }
+
+        missingRelations.forEach { userId ->
+            results.putIfAbsent(
+                userId,
+                FollowActionResult(FollowActionStatus.FAILED, "Bilibili 关注关系未返回：uid=$userId"),
+            )
+        }
+        return ids.associateWith { userId ->
+            results[userId] ?: FollowActionResult(FollowActionStatus.NOOP)
+        }
     }
 
     suspend fun unfollowPublisher(userId: String): FollowActionResult {
@@ -88,14 +177,15 @@ internal class BilibiliFollowService(
         ensureFollowGroupId()
     }
 
-    private suspend fun addPublisherToFollowGroup(userId: String) {
+    private suspend fun addPublishersToFollowGroup(userIds: Collection<String>) {
         val groupId = ensureFollowGroupId() ?: return
-        val uid = userId.toLongOrNull() ?: return
-        requestFailureHandler.run("加入关注分组 uid=$userId groupId=$groupId") {
-            gateway.addUsersToFollowGroup(listOf(uid), listOf(groupId))
+        val uids = userIds.mapNotNull { it.toLongOrNull() }.distinct()
+        if (uids.isEmpty()) return
+        requestFailureHandler.run("批量加入关注分组 count=${uids.size} groupId=$groupId") {
+            gateway.addUsersToFollowGroup(uids, listOf(groupId))
         }.onFailure {
             followLogger.warn(it) {
-                "加入 Bilibili 关注分组失败：uid=$userId，groupId=$groupId"
+                "批量加入 Bilibili 关注分组失败：count=${uids.size}，groupId=$groupId"
             }
         }
     }
@@ -171,6 +261,15 @@ internal class BilibiliFollowService(
 
     private fun normalizedFollowGroupName(): String? {
         return config.followGroupName.trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun normalizeUserIds(userIds: Collection<String>): List<String> {
+        return userIds
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .toList()
     }
 
     private fun skipAutoUnfollow(userId: String, reason: String): FollowActionResult {
