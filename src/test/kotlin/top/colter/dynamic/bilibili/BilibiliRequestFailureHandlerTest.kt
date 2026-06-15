@@ -1,6 +1,7 @@
 package top.colter.dynamic.bilibili
 
 import kotlinx.coroutines.runBlocking
+import top.colter.bilibili.exception.BiliAuthException
 import top.colter.bilibili.exception.BiliBanException
 import top.colter.bilibili.exception.BiliLoginException
 import top.colter.dynamic.core.event.SystemNotificationPublishRequest
@@ -13,6 +14,32 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class BilibiliRequestFailureHandlerTest {
+    @Test
+    fun `missing csrf should notify once without pausing polling`() = runBlocking {
+        val requests = mutableListOf<SystemNotificationPublishRequest>()
+        val handler = BilibiliRequestFailureHandler(
+            configProvider = {
+                BilibiliPublisherConfig(maxConsecutiveLoginFailures = 2)
+            },
+            notificationPublisher = SystemNotificationPublisher { request ->
+                requests += request
+                SystemNotificationPublishResult.accepted()
+            },
+        )
+
+        handler.recordFailure("批量加入关注分组", BiliAuthException("缺少 CSRF Token，请先登录或手动传入 csrf"))
+
+        assertFalse(handler.isPollingPaused())
+        assertEquals(1, requests.size)
+        assertEquals("bilibili.missing_csrf", requests.single().type)
+        assertEquals(SystemNotificationSeverity.WARN, requests.single().severity)
+
+        handler.recordFailure("批量关注发布者", BiliAuthException("缺少 CSRF Token，请先登录或手动传入 csrf"))
+
+        assertFalse(handler.isPollingPaused())
+        assertEquals(1, requests.size)
+    }
+
     @Test
     fun `login failure pause should notify once and recovery should notify once`() = runBlocking {
         val requests = mutableListOf<SystemNotificationPublishRequest>()

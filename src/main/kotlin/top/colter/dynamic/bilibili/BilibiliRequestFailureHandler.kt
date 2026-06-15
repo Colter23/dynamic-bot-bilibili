@@ -23,6 +23,7 @@ internal class BilibiliRequestFailureHandler(
     private var consecutiveLoginFailures: Int = 0
     private var pollingPausedByLoginFailure: Boolean = false
     private var requestBlockPausedUntilMillis: Long? = null
+    private var missingCsrfNotificationPublished: Boolean = false
 
     fun isPollingPaused(): Boolean {
         return pollingPausedByLoginFailure || isRequestBlockCooldownActive()
@@ -85,6 +86,7 @@ internal class BilibiliRequestFailureHandler(
         when (error) {
             is BiliLoginException -> recordLoginFailure(operation, error)
             is BiliBanException -> recordRequestBlockFailure(operation, error)
+            is BiliAuthException if error.isMissingBilibiliCsrfToken() -> recordMissingCsrfFailure(operation, error)
             is BiliAuthException -> recordNonLoginBiliFailure(
                 operation = operation,
                 error = error,
@@ -107,6 +109,32 @@ internal class BilibiliRequestFailureHandler(
             )
             else -> recordUnknownFailure(operation, error)
         }
+    }
+
+    private suspend fun recordMissingCsrfFailure(operation: String, error: BiliAuthException) {
+        consecutiveLoginFailures = 0
+        requestFailureLogger.warn {
+            "Bilibili 写操作认证失败：operation=$operation，原因=$BILIBILI_MISSING_CSRF_MESSAGE"
+        }
+        requestFailureLogger.debug(error) {
+            "Bilibili 写操作认证失败详情：operation=$operation"
+        }
+        if (missingCsrfNotificationPublished) return
+
+        missingCsrfNotificationPublished = true
+        publishNotification(
+            SystemNotificationPublishRequest(
+                type = "bilibili.missing_csrf",
+                severity = SystemNotificationSeverity.WARN,
+                title = "Bilibili Cookie 缺少 CSRF Token",
+                content = BILIBILI_MISSING_CSRF_MESSAGE,
+                dedupeKey = "bilibili.missing_csrf",
+                details = mapOf(
+                    "operation" to operation,
+                    "error" to (error.message ?: "未知"),
+                ),
+            ),
+        )
     }
 
     private suspend fun recordRequestBlockFailure(operation: String, error: BiliBanException) {

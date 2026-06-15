@@ -100,7 +100,7 @@ internal class BilibiliFollowService(
                 return ids.associateWith { userId ->
                     results[userId] ?: FollowActionResult(
                         FollowActionStatus.FAILED,
-                        error.message ?: "Bilibili 批量关注失败",
+                        error.toBilibiliWriteFailureMessage("Bilibili 批量关注失败"),
                     )
                 }
             }
@@ -157,7 +157,7 @@ internal class BilibiliFollowService(
         }.getOrElse { error ->
             return FollowActionResult(
                 FollowActionStatus.FAILED,
-                error.message ?: "Bilibili 自动取消关注失败",
+                error.toBilibiliWriteFailureMessage("Bilibili 自动取消关注失败"),
             )
         }
 
@@ -183,9 +183,11 @@ internal class BilibiliFollowService(
         if (uids.isEmpty()) return
         requestFailureHandler.run("批量加入关注分组 count=${uids.size} groupId=$groupId") {
             gateway.addUsersToFollowGroup(uids, listOf(groupId))
-        }.onFailure {
-            followLogger.warn(it) {
-                "批量加入 Bilibili 关注分组失败：count=${uids.size}，groupId=$groupId"
+        }.onFailure { error ->
+            if (!error.isMissingBilibiliCsrfToken()) {
+                followLogger.warn(error) {
+                    "批量加入 Bilibili 关注分组失败：count=${uids.size}，groupId=$groupId"
+                }
             }
         }
     }
@@ -235,9 +237,13 @@ internal class BilibiliFollowService(
 
         requestFailureHandler.run("创建关注分组 name=$groupName") {
             gateway.createFollowGroup(groupName)
-        }.onFailure {
-            followLogger.warn(it) {
-                "创建 Bilibili 关注分组失败：name=$groupName"
+        }.onFailure { error ->
+            if (error.isMissingBilibiliCsrfToken()) {
+                return null
+            } else {
+                followLogger.warn(error) {
+                    "创建 Bilibili 关注分组失败：name=$groupName"
+                }
             }
         }
 

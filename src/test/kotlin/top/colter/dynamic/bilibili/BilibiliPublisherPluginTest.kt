@@ -24,6 +24,7 @@ import top.colter.bilibili.data.login.QrCodeLoginResult
 import top.colter.bilibili.data.login.QrCodeLoginStatus
 import top.colter.bilibili.data.user.BiliGroup
 import top.colter.bilibili.data.user.BiliUserInfo
+import top.colter.bilibili.exception.BiliAuthException
 import top.colter.bilibili.exception.BiliBanException
 import top.colter.bilibili.exception.BiliLoginException
 import top.colter.dynamic.core.data.EntityState
@@ -276,6 +277,48 @@ class BilibiliPublisherPluginTest {
         assertEquals(listOf(listOf("456")), gateway.followedUserBatches)
         assertEquals(
             listOf(GroupUsersCall(listOf(123L, 456L), listOf(1L))),
+            gateway.addedGroupUsers,
+        )
+    }
+
+    @Test
+    fun `followPublisher should report missing csrf for write operation`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.NOT_FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            followFailure = BiliAuthException("缺少 CSRF Token，请先登录或手动传入 csrf"),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val result = plugin.followPublisher("123")
+
+        assertEquals(FollowActionStatus.FAILED, result.status)
+        assertEquals(BILIBILI_MISSING_CSRF_MESSAGE, result.message)
+        assertEquals(listOf(listOf("123")), gateway.followedUserBatches)
+    }
+
+    @Test
+    fun `followPublisher should keep follow result when group assignment lacks csrf`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.NOT_FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
+            addGroupFailure = BiliAuthException("缺少 CSRF Token，请先登录或手动传入 csrf"),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(followGroupName = "Bot关注"),
+        )
+        plugin.init()
+
+        val result = plugin.followPublisher("123")
+
+        assertEquals(FollowActionStatus.DONE, result.status)
+        assertEquals(
+            listOf(GroupUsersCall(listOf(123L), listOf(1L))),
             gateway.addedGroupUsers,
         )
     }
@@ -1084,6 +1127,33 @@ class BilibiliPublisherPluginTest {
             assertEquals(case.expectedGroupFetchCount, gateway.groupFetchCount, case.name)
             assertTrue(gateway.createdGroupNames.isEmpty(), case.name)
         }
+    }
+
+    @Test
+    fun `unfollowPublisher should report missing csrf for write operation`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
+            followRelation = BilibiliFollowRelationSnapshot(
+                userId = "123",
+                following = true,
+                tagIds = setOf(1L),
+            ),
+            unfollowFailure = BiliAuthException("缺少 CSRF Token，请先登录或手动传入 csrf"),
+        )
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(followGroupName = "Bot关注"),
+        )
+
+        plugin.init()
+        val result = plugin.unfollowPublisher("123")
+
+        assertEquals(FollowActionStatus.FAILED, result.status)
+        assertEquals(BILIBILI_MISSING_CSRF_MESSAGE, result.message)
+        assertEquals(listOf("123"), gateway.unfollowedUsers)
     }
 
     @Test
@@ -1908,6 +1978,9 @@ class BilibiliPublisherPluginTest {
         private val followRelations: Map<String, BilibiliFollowRelationSnapshot> = emptyMap(),
         private val missingFollowRelationIds: Set<String> = emptySet(),
         private val relationFailure: Throwable? = null,
+        private val followFailure: Throwable? = null,
+        private val addGroupFailure: Throwable? = null,
+        private val unfollowFailure: Throwable? = null,
         private val unfollowActionResult: FollowActionResult = FollowActionResult(
             FollowActionStatus.DONE,
             "unfollowed",
@@ -2053,11 +2126,13 @@ class BilibiliPublisherPluginTest {
 
         override suspend fun followPublishers(userIds: Collection<String>): FollowActionResult {
             followedUserBatches.add(userIds.toList())
+            followFailure?.let { throw it }
             return followActionResult
         }
 
         override suspend fun unfollowPublisher(userId: String): FollowActionResult {
             unfollowedUsers.add(userId)
+            unfollowFailure?.let { throw it }
             return unfollowActionResult
         }
 
@@ -2075,6 +2150,7 @@ class BilibiliPublisherPluginTest {
 
         override suspend fun addUsersToFollowGroup(fids: Iterable<Long>, tagIds: Iterable<Long>) {
             addedGroupUsers.add(GroupUsersCall(fids.toList(), tagIds.toList()))
+            addGroupFailure?.let { throw it }
         }
 
         override suspend fun checkLoginState(): PublisherLoginResult = loginStateResult
