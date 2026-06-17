@@ -224,8 +224,11 @@ internal class BilibiliRequestFailureHandler(
         category: String,
     ) {
         consecutiveLoginFailures = 0
-        requestFailureLogger.warn(error) {
+        requestFailureLogger.warn {
             "Bilibili 请求失败：operation=$operation，类型=$category，原因=${error.message ?: "未知"}"
+        }
+        requestFailureLogger.debug(error) {
+            "Bilibili 请求失败详情：operation=$operation，类型=$category"
         }
     }
 
