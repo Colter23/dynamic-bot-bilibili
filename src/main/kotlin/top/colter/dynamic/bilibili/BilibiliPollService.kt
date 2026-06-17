@@ -85,6 +85,10 @@ internal data class BilibiliVideoSnapshot(
     val play: Long? = null,
     val danmaku: Long? = null,
     val like: Long? = null,
+    val comment: Long? = null,
+    val favorite: Long? = null,
+    val coin: Long? = null,
+    val share: Long? = null,
 )
 
 internal data class BilibiliLiveSnapshot(
@@ -688,6 +692,13 @@ internal class BilibiliPollService(
             ownerFaceUrl = owner.face.url.toNormalizedBiliImageUrl(),
             durationSeconds = duration.takeIf { it > 0 }?.toLong(),
             publishedAtEpochSeconds = pubTime.takeIf { it > 0 },
+            play = stat?.view?.takeIf { it > 0 }?.toLong(),
+            danmaku = stat?.danmaku?.takeIf { it > 0 }?.toLong(),
+            like = stat?.like?.takeIf { it > 0 }?.toLong(),
+            comment = stat?.reply?.takeIf { it > 0 }?.toLong(),
+            favorite = stat?.favorite?.takeIf { it > 0 }?.toLong(),
+            coin = stat?.coin?.takeIf { it > 0 }?.toLong(),
+            share = stat?.share?.takeIf { it > 0 }?.toLong(),
         )
     }
 

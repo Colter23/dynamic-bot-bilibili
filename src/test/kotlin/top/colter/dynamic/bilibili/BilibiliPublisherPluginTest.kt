@@ -437,6 +437,10 @@ class BilibiliPublisherPluginTest {
                     play = 12_345,
                     danmaku = 234,
                     like = 56,
+                    comment = 7,
+                    favorite = 8,
+                    coin = 9,
+                    share = 10,
                 ),
             ),
         )
@@ -452,7 +456,7 @@ class BilibiliPublisherPluginTest {
         assertEquals("视频", resolution.preview.badge)
         assertEquals("42", resolution.preview.publisher?.externalId)
         assertEquals(120, resolution.preview.durationSeconds)
-        assertEquals(listOf("play", "danmaku", "like"), resolution.preview.metrics.map { it.key })
+        assertEquals(listOf("play", "danmaku", "like", "coin", "favorite", "comment", "share"), resolution.preview.metrics.map { it.key })
         assertEquals(listOf("BV1xx411c7mD"), gateway.requestedVideos)
     }
 
