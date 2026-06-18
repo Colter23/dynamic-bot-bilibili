@@ -2,6 +2,7 @@ package top.colter.dynamic.bilibili
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import top.colter.bilibili.exception.BiliEmptyException
 import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
@@ -36,13 +37,16 @@ internal class BilibiliFollowService(
     suspend fun queryFollowStates(userIds: Collection<String>): Map<String, FollowState> {
         val ids = normalizeUserIds(userIds)
         if (ids.isEmpty()) return emptyMap()
+        if (ids.size == 1) {
+            val userId = ids.single()
+            return mapOf(userId to queryFollowState(userId))
+        }
         return requestFailureHandler.run("批量关注状态查询 count=${ids.size}") {
-            val relations = gateway.fetchFollowRelations(ids)
+            val relations = fetchFollowRelationsWithEmptyFallback(ids)
             ids.associateWith { userId ->
                 val relation = relations[userId]
                 when {
-                    relation == null -> FollowState.UNSUPPORTED
-                    relation.following -> FollowState.FOLLOWING
+                    relation?.following == true -> FollowState.FOLLOWING
                     else -> FollowState.NOT_FOLLOWING
                 }
             }
@@ -56,8 +60,36 @@ internal class BilibiliFollowService(
         if (normalized.isBlank()) {
             return FollowActionResult(FollowActionStatus.FAILED, "Bilibili 用户 ID 不能为空")
         }
-        return followPublishers(listOf(normalized))[normalized]
-            ?: FollowActionResult(FollowActionStatus.FAILED, "Bilibili 关注失败")
+        if (normalized.toLongOrNull() == null) {
+            return FollowActionResult(FollowActionStatus.FAILED, "无效的 Bilibili 用户 ID：$normalized")
+        }
+
+        val relation = requestFailureHandler.run("关注关系查询 uid=$normalized") {
+            gateway.fetchFollowRelation(normalized)
+        }.getOrElse { error ->
+            return FollowActionResult(
+                FollowActionStatus.FAILED,
+                error.message ?: "Bilibili 关注状态查询失败",
+            )
+        } ?: return FollowActionResult(FollowActionStatus.FAILED, "Bilibili 关注关系未返回：uid=$normalized")
+
+        if (relation.following) {
+            addPublishersToFollowGroup(listOf(normalized))
+            return FollowActionResult(FollowActionStatus.NOOP)
+        }
+
+        val result = requestFailureHandler.run("关注发布者 uid=$normalized") {
+            gateway.followPublisher(normalized)
+        }.getOrElse { error ->
+            return FollowActionResult(
+                FollowActionStatus.FAILED,
+                error.toBilibiliWriteFailureMessage("Bilibili 关注失败"),
+            )
+        }
+        if (result.status == FollowActionStatus.DONE || result.status == FollowActionStatus.NOOP) {
+            addPublishersToFollowGroup(listOf(normalized))
+        }
+        return result
     }
 
     suspend fun followPublishers(userIds: Collection<String>): Map<String, FollowActionResult> {
@@ -65,7 +97,7 @@ internal class BilibiliFollowService(
         if (ids.isEmpty()) return emptyMap()
 
         val relations = requestFailureHandler.run("批量关注状态查询 count=${ids.size}") {
-            gateway.fetchFollowRelations(ids)
+            fetchFollowRelationsWithEmptyFallback(ids)
         }.getOrElse { error ->
             return ids.associateWith {
                 FollowActionResult(
@@ -76,9 +108,8 @@ internal class BilibiliFollowService(
         }
 
         val invalidIds = ids.filterNot { it.toLongOrNull() != null }
-        val missingRelations = ids.filter { it !in relations && it !in invalidIds }
         val toFollow = ids.filter { userId ->
-            userId !in invalidIds && relations[userId]?.following == false
+            userId !in invalidIds && relations[userId]?.following != true
         }
         val alreadyFollowing = ids.filter { relations[it]?.following == true }
         val results = linkedMapOf<String, FollowActionResult>()
@@ -126,14 +157,21 @@ internal class BilibiliFollowService(
             addPublishersToFollowGroup(groupCandidates)
         }
 
-        missingRelations.forEach { userId ->
-            results.putIfAbsent(
-                userId,
-                FollowActionResult(FollowActionStatus.FAILED, "Bilibili 关注关系未返回：uid=$userId"),
-            )
-        }
         return ids.associateWith { userId ->
             results[userId] ?: FollowActionResult(FollowActionStatus.NOOP)
+        }
+    }
+
+    private suspend fun fetchFollowRelationsWithEmptyFallback(
+        ids: List<String>,
+    ): Map<String, BilibiliFollowRelationSnapshot> {
+        return try {
+            gateway.fetchFollowRelations(ids)
+        } catch (error: BiliEmptyException) {
+            followLogger.info {
+                "Bilibili 批量关注状态查询无数据，已按全部未关注处理：count=${ids.size}"
+            }
+            emptyMap()
         }
     }
 

@@ -26,6 +26,7 @@ import top.colter.bilibili.data.user.BiliGroup
 import top.colter.bilibili.data.user.BiliUserInfo
 import top.colter.bilibili.exception.BiliAuthException
 import top.colter.bilibili.exception.BiliBanException
+import top.colter.bilibili.exception.BiliEmptyException
 import top.colter.bilibili.exception.BiliLoginException
 import top.colter.dynamic.core.data.EntityState
 import top.colter.dynamic.core.data.LivePayload
@@ -245,7 +246,7 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
-    fun `queryFollowStates should mark missing relations as unsupported`() = runBlocking {
+    fun `queryFollowStates should mark missing relations as not following`() = runBlocking {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.NOT_FOLLOWING,
@@ -261,12 +262,12 @@ class BilibiliPublisherPluginTest {
         val states = plugin.queryFollowStates(listOf("123", "456"))
 
         assertEquals(FollowState.NOT_FOLLOWING, states["123"])
-        assertEquals(FollowState.UNSUPPORTED, states["456"])
+        assertEquals(FollowState.NOT_FOLLOWING, states["456"])
         assertEquals(listOf(listOf("123", "456")), gateway.requestedRelationBatches)
     }
 
     @Test
-    fun `followPublisher should query relation and use batch follow`() = runBlocking {
+    fun `followPublisher should query single relation and use direct follow`() = runBlocking {
         val gateway = FakeGateway(
             snapshot = null,
             followState = FollowState.NOT_FOLLOWING,
@@ -278,8 +279,10 @@ class BilibiliPublisherPluginTest {
         val result = plugin.followPublisher("123")
 
         assertEquals(FollowActionStatus.DONE, result.status)
-        assertEquals(listOf(listOf("123")), gateway.requestedRelationBatches)
-        assertEquals(listOf(listOf("123")), gateway.followedUserBatches)
+        assertEquals(listOf("123"), gateway.requestedRelations)
+        assertEquals(emptyList(), gateway.requestedRelationBatches)
+        assertEquals(listOf("123"), gateway.followedUsers)
+        assertEquals(emptyList(), gateway.followedUserBatches)
     }
 
     @Test
@@ -291,8 +294,8 @@ class BilibiliPublisherPluginTest {
             initialGroups = listOf(BiliGroup(tid = 1L, name = "Bot关注", count = 1, tip = null)),
             followRelations = mapOf(
                 "123" to BilibiliFollowRelationSnapshot("123", following = true, tagIds = emptySet()),
-                "456" to BilibiliFollowRelationSnapshot("456", following = false, tagIds = emptySet()),
             ),
+            missingFollowRelationIds = setOf("456"),
         )
         val plugin = testPlugin(
             gateway,
@@ -313,6 +316,26 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `followPublishers should treat empty batch relation as not following`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.NOT_FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            batchRelationFailure = BiliEmptyException(),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val results = plugin.followPublishers(listOf("123", "456"))
+
+        assertEquals(FollowActionStatus.DONE, results["123"]?.status)
+        assertEquals(FollowActionStatus.DONE, results["456"]?.status)
+        assertEquals(listOf(listOf("123", "456")), gateway.requestedRelationBatches)
+        assertEquals(emptyList(), gateway.requestedRelations)
+        assertEquals(listOf(listOf("123", "456")), gateway.followedUserBatches)
+    }
+
+    @Test
     fun `followPublisher should report missing csrf for write operation`() = runBlocking {
         val gateway = FakeGateway(
             snapshot = null,
@@ -327,7 +350,8 @@ class BilibiliPublisherPluginTest {
 
         assertEquals(FollowActionStatus.FAILED, result.status)
         assertEquals(BILIBILI_MISSING_CSRF_MESSAGE, result.message)
-        assertEquals(listOf(listOf("123")), gateway.followedUserBatches)
+        assertEquals(listOf("123"), gateway.followedUsers)
+        assertEquals(emptyList(), gateway.followedUserBatches)
     }
 
     @Test
@@ -348,6 +372,8 @@ class BilibiliPublisherPluginTest {
         val result = plugin.followPublisher("123")
 
         assertEquals(FollowActionStatus.DONE, result.status)
+        assertEquals(listOf("123"), gateway.followedUsers)
+        assertEquals(emptyList(), gateway.followedUserBatches)
         assertEquals(
             listOf(GroupUsersCall(listOf(123L), listOf(1L))),
             gateway.addedGroupUsers,
@@ -2014,6 +2040,7 @@ class BilibiliPublisherPluginTest {
         private val followRelations: Map<String, BilibiliFollowRelationSnapshot> = emptyMap(),
         private val missingFollowRelationIds: Set<String> = emptySet(),
         private val relationFailure: Throwable? = null,
+        private val batchRelationFailure: Throwable? = null,
         private val followFailure: Throwable? = null,
         private val addGroupFailure: Throwable? = null,
         private val unfollowFailure: Throwable? = null,
@@ -2050,6 +2077,8 @@ class BilibiliPublisherPluginTest {
         val expandedShortUrls: MutableList<String> = CopyOnWriteArrayList()
         val searchedPublishers: MutableList<Pair<String, Int>> = CopyOnWriteArrayList()
         val requestedPublisherBatches: MutableList<List<String>> = CopyOnWriteArrayList()
+        val requestedRelations: MutableList<String> = CopyOnWriteArrayList()
+        val followedUsers: MutableList<String> = CopyOnWriteArrayList()
         val unfollowedUsers: MutableList<String> = CopyOnWriteArrayList()
         val requestedRelationBatches: MutableList<List<String>> = CopyOnWriteArrayList()
         val followedUserBatches: MutableList<List<String>> = CopyOnWriteArrayList()
@@ -2144,9 +2173,14 @@ class BilibiliPublisherPluginTest {
 
         override suspend fun queryFollowState(userId: String): FollowState = followState
 
-        override suspend fun followPublisher(userId: String): FollowActionResult = followActionResult
+        override suspend fun followPublisher(userId: String): FollowActionResult {
+            followedUsers.add(userId)
+            followFailure?.let { throw it }
+            return followActionResult
+        }
 
         override suspend fun fetchFollowRelation(userId: String): BilibiliFollowRelationSnapshot? {
+            requestedRelations.add(userId)
             relationFailure?.let { throw it }
             return followRelation ?: BilibiliFollowRelationSnapshot(
                 userId = userId,
@@ -2158,6 +2192,7 @@ class BilibiliPublisherPluginTest {
         override suspend fun fetchFollowRelations(userIds: Collection<String>): Map<String, BilibiliFollowRelationSnapshot> {
             val requested = userIds.toList()
             requestedRelationBatches.add(requested)
+            batchRelationFailure?.let { throw it }
             relationFailure?.let { throw it }
             return requested.mapNotNull { userId ->
                 if (userId in missingFollowRelationIds) return@mapNotNull null

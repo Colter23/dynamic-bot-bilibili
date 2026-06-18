@@ -188,6 +188,11 @@ internal interface BilibiliPlatformGateway {
 
     suspend fun queryFollowState(userId: String): FollowState
 
+    /**
+     * 执行关注写操作，不在网关层判断当前关注状态。
+     *
+     * 是否需要关注、是否需要加入 Bot 关注分组由 [BilibiliFollowService] 统一处理。
+     */
     suspend fun followPublisher(userId: String): FollowActionResult
 
     suspend fun fetchFollowRelation(userId: String): BilibiliFollowRelationSnapshot? {
@@ -551,19 +556,13 @@ internal class BilibiliPollService(
     }
 
     override suspend fun followPublisher(userId: String): FollowActionResult {
-        return when (queryFollowState(userId)) {
-            FollowState.FOLLOWING -> FollowActionResult(FollowActionStatus.NOOP)
-            FollowState.UNSUPPORTED -> FollowActionResult(FollowActionStatus.UNSUPPORTED)
-            FollowState.NOT_FOLLOWING -> {
-                val uid = userId.toLongOrNull()
-                    ?: return FollowActionResult(
-                        FollowActionStatus.FAILED,
-                        "无效的 Bilibili 用户 ID：$userId",
-                    )
-                callWithRequestDelay { client.follow(uid) }
-                FollowActionResult(FollowActionStatus.DONE)
-            }
-        }
+        val uid = userId.toLongOrNull()
+            ?: return FollowActionResult(
+                FollowActionStatus.FAILED,
+                "无效的 Bilibili 用户 ID：$userId",
+            )
+        callWithRequestDelay { client.follow(uid) }
+        return FollowActionResult(FollowActionStatus.DONE)
     }
 
     override suspend fun followPublishers(userIds: Collection<String>): FollowActionResult {
