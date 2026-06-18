@@ -45,6 +45,7 @@ import top.colter.dynamic.core.plugin.FollowActionResult
 import top.colter.dynamic.core.plugin.FollowActionStatus
 import top.colter.dynamic.core.plugin.FollowState
 import top.colter.dynamic.core.plugin.PluginContext
+import top.colter.dynamic.core.plugin.PublisherBatchLookupPlugin
 import top.colter.dynamic.core.plugin.PublisherFollowPlugin
 import top.colter.dynamic.core.plugin.PublisherLoginMethod
 import top.colter.dynamic.core.plugin.PublisherLoginProvider
@@ -67,6 +68,7 @@ private val logger = loggerFor<BilibiliPublisherRuntime>()
 internal class BilibiliPublisherRuntime() :
     PublisherSourcePlugin,
     PublisherLookupPlugin,
+    PublisherBatchLookupPlugin,
     PublisherFollowPlugin,
     PublisherLoginProvider,
     LinkResolver,
@@ -319,6 +321,19 @@ internal class BilibiliPublisherRuntime() :
             pollService.fetchPublisherSnapshot(userId)
         }.getOrNull() ?: return null
         return snapshot.toPublisherInfo()
+    }
+
+    override suspend fun fetchPublisherInfos(userIds: Collection<String>): Map<String, PublisherInfo> {
+        ensurePollServiceReady()
+        val ids = userIds
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+        if (ids.isEmpty()) return emptyMap()
+        val snapshots = runBilibiliRequest("批量发布者资料查询 count=${ids.size}") {
+            pollService.fetchPublisherSnapshots(ids)
+        }.getOrNull().orEmpty()
+        return snapshots.mapValues { (_, snapshot) -> snapshot.toPublisherInfo() }
     }
 
     override suspend fun searchPublisherInfo(query: String, limit: Int): List<PublisherInfo> {

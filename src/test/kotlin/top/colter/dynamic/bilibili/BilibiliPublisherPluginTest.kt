@@ -168,6 +168,37 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `fetchPublisherInfos should use gateway batch snapshots`() = runBlocking {
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            batchSnapshots = mapOf(
+                "123" to BilibiliPublisherSnapshot(
+                    userId = "123",
+                    name = "demo-up-1",
+                    avatarBadgeKey = "avatarBadge.official.individual",
+                    faceUrl = "https://example.com/123.png",
+                ),
+                "456" to BilibiliPublisherSnapshot(
+                    userId = "456",
+                    name = "demo-up-2",
+                    faceUrl = "https://example.com/456.png",
+                ),
+            ),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val profiles = plugin.fetchPublisherInfos(listOf("123", "456", "123"))
+
+        assertEquals(listOf(listOf("123", "456")), gateway.requestedPublisherBatches)
+        assertEquals(setOf("123", "456"), profiles.keys)
+        assertEquals("demo-up-1", profiles["123"]?.name)
+        assertEquals("avatarBadge.official.individual", profiles["123"]?.avatarBadgeKey)
+    }
+
+    @Test
     fun `searchPublisherInfo should map gateway search snapshots`() = runBlocking {
         val gateway = FakeGateway(
             snapshot = null,
@@ -1978,6 +2009,7 @@ class BilibiliPublisherPluginTest {
         private val videoSnapshots: Map<String, BilibiliVideoSnapshot> = emptyMap(),
         private val liveRoomSnapshots: Map<String, BilibiliLiveRoomSnapshot> = emptyMap(),
         private val searchSnapshots: List<BilibiliPublisherSnapshot> = emptyList(),
+        private val batchSnapshots: Map<String, BilibiliPublisherSnapshot> = emptyMap(),
         private val followRelation: BilibiliFollowRelationSnapshot? = null,
         private val followRelations: Map<String, BilibiliFollowRelationSnapshot> = emptyMap(),
         private val missingFollowRelationIds: Set<String> = emptySet(),
@@ -2017,6 +2049,7 @@ class BilibiliPublisherPluginTest {
         val requestedLiveRooms: MutableList<String> = CopyOnWriteArrayList()
         val expandedShortUrls: MutableList<String> = CopyOnWriteArrayList()
         val searchedPublishers: MutableList<Pair<String, Int>> = CopyOnWriteArrayList()
+        val requestedPublisherBatches: MutableList<List<String>> = CopyOnWriteArrayList()
         val unfollowedUsers: MutableList<String> = CopyOnWriteArrayList()
         val requestedRelationBatches: MutableList<List<String>> = CopyOnWriteArrayList()
         val followedUserBatches: MutableList<List<String>> = CopyOnWriteArrayList()
@@ -2095,6 +2128,14 @@ class BilibiliPublisherPluginTest {
         }
 
         override suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot? = snapshot
+
+        override suspend fun fetchPublisherSnapshots(userIds: Collection<String>): Map<String, BilibiliPublisherSnapshot> {
+            val requested = userIds.toList()
+            requestedPublisherBatches.add(requested)
+            return requested.mapNotNull { userId ->
+                batchSnapshots[userId]?.let { userId to it }
+            }.toMap()
+        }
 
         override suspend fun searchPublisherSnapshots(query: String, limit: Int): List<BilibiliPublisherSnapshot> {
             searchedPublishers.add(query to limit)

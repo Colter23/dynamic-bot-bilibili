@@ -13,6 +13,7 @@ import top.colter.bilibili.api.getLiveStatusBatch
 import top.colter.bilibili.api.getNewDynamic
 import top.colter.bilibili.api.getGroupList
 import top.colter.bilibili.api.getUserInfo
+import top.colter.bilibili.api.getUserInfoBatch
 import top.colter.bilibili.api.getVideoDetail
 import top.colter.bilibili.api.modifyGroupUsers
 import top.colter.bilibili.api.probeVideoDownloadSize
@@ -130,6 +131,17 @@ private class BilibiliVideoDownloadSizeExceededException(
     },
 )
 
+private fun BiliUserInfo.toPublisherSnapshot(): BilibiliPublisherSnapshot {
+    return BilibiliPublisherSnapshot(
+        userId = mid.toString(),
+        name = name,
+        avatarBadgeKey = official.toAvatarBadgeKey(),
+        faceUrl = face.url,
+        headerUrl = header?.image?.url,
+        pendantUrl = pendant?.image?.url?.takeIf { it.isNotBlank() },
+    )
+}
+
 internal interface BilibiliPlatformGateway {
     fun close() {
     }
@@ -147,6 +159,12 @@ internal interface BilibiliPlatformGateway {
     }
 
     suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot?
+
+    suspend fun fetchPublisherSnapshots(userIds: Collection<String>): Map<String, BilibiliPublisherSnapshot> {
+        return userIds.distinct().mapNotNull { userId ->
+            fetchPublisherSnapshot(userId)?.let { userId to it }
+        }.toMap()
+    }
 
     suspend fun searchPublisherSnapshots(query: String, limit: Int = 10): List<BilibiliPublisherSnapshot> {
         return fetchPublisherSnapshot(query)?.let(::listOf).orEmpty()
@@ -311,14 +329,21 @@ internal class BilibiliPollService(
     override suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot? {
         val uid = userId.toLongOrNull() ?: return null
         val info = callWithRequestDelay { client.getUserInfo(uid) }
-        return BilibiliPublisherSnapshot(
-            userId = info.mid.toString(),
-            name = info.name,
-            avatarBadgeKey = info.official.toAvatarBadgeKey(),
-            faceUrl = info.face.url,
-            headerUrl = info.header?.image?.url,
-            pendantUrl = info.pendant?.image?.url?.takeIf { it.isNotBlank() },
-        )
+        return info.toPublisherSnapshot()
+    }
+
+    override suspend fun fetchPublisherSnapshots(userIds: Collection<String>): Map<String, BilibiliPublisherSnapshot> {
+        val uidByText = userIds
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .mapNotNull { userId -> userId.toLongOrNull()?.let { userId to it } }
+        if (uidByText.isEmpty()) return emptyMap()
+        val snapshots = callWithRequestDelay { client.getUserInfoBatch(uidByText.map { it.second }) }
+            .associateBy { it.mid }
+        return uidByText.mapNotNull { (userId, uid) ->
+            snapshots[uid]?.toPublisherSnapshot()?.let { userId to it }
+        }.toMap()
     }
 
     override suspend fun searchPublisherSnapshots(query: String, limit: Int): List<BilibiliPublisherSnapshot> {
