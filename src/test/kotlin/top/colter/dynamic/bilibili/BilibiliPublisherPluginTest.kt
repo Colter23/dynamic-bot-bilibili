@@ -512,9 +512,13 @@ class BilibiliPublisherPluginTest {
         assertEquals("demo video", resolution.preview.title)
         assertEquals("视频", resolution.preview.badge)
         assertEquals("42", resolution.preview.publisher?.externalId)
+        assertEquals("demo-up", resolution.preview.publisher?.name)
+        assertEquals("https://example.com/owner-face.png", resolution.preview.publisher?.avatar?.uri)
+        assertNull(resolution.preview.publisher?.banner)
         assertEquals(120, resolution.preview.durationSeconds)
         assertEquals(listOf("play", "danmaku", "like", "coin", "favorite", "comment", "share"), resolution.preview.metrics.map { it.key })
         assertEquals(listOf("BV1xx411c7mD"), gateway.requestedVideos)
+        assertEquals(emptyList(), gateway.requestedPublisherSnapshots)
     }
 
     @Test
@@ -551,6 +555,40 @@ class BilibiliPublisherPluginTest {
         assertEquals("live-up", resolution.preview.publisher?.name)
         assertEquals(listOf("online", "follow"), resolution.preview.metrics.map { it.key })
         assertEquals(listOf("12345"), gateway.requestedLiveRooms)
+        assertEquals(listOf("42"), gateway.requestedPublisherSnapshots)
+    }
+
+    @Test
+    fun `resolveLink should keep live room preview when publisher info is unavailable`() = runBlocking {
+        val gateway = defaultGateway(
+            snapshot = null,
+            liveRoomSnapshots = mapOf(
+                "12345" to BilibiliLiveRoomSnapshot(
+                    userId = "42",
+                    roomId = "12345",
+                    status = LiveStatus.OPEN,
+                    title = "demo live",
+                    area = "Games / Demo",
+                    coverUrl = "https://example.com/live-cover.png",
+                    online = 123,
+                    attention = 456,
+                ),
+            ),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val parsed = plugin.parseLink("https://live.bilibili.com/12345")!!
+        val resolution = plugin.resolveLink(parsed)
+
+        assertIs<LinkResolution.Preview>(resolution)
+        assertEquals(LinkKinds.LIVE, resolution.preview.kind)
+        assertEquals("demo live", resolution.preview.title)
+        assertEquals("42", resolution.preview.publisher?.externalId)
+        assertEquals("42", resolution.preview.publisher?.name)
+        assertEquals("https://example.com/live-cover.png", resolution.preview.cover?.uri)
+        assertEquals(listOf("12345"), gateway.requestedLiveRooms)
+        assertEquals(listOf("42"), gateway.requestedPublisherSnapshots)
     }
 
     @Test
@@ -575,6 +613,22 @@ class BilibiliPublisherPluginTest {
         assertEquals("demo-up", resolution.preview.title)
         assertEquals("用户", resolution.preview.badge)
         assertEquals("https://example.com/header.png", resolution.preview.cover?.uri)
+        assertEquals("https://example.com/header.png", resolution.preview.publisher?.banner?.uri)
+        assertEquals(listOf("42"), gateway.requestedPublisherSnapshots)
+    }
+
+    @Test
+    fun `resolveLink should fail user preview when publisher info is unavailable`() = runBlocking {
+        val gateway = defaultGateway(snapshot = null)
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val parsed = plugin.parseLink("https://space.bilibili.com/42")!!
+        val resolution = plugin.resolveLink(parsed)
+
+        assertIs<LinkResolution.Failed>(resolution)
+        assertEquals("未找到 Bilibili 用户：42", resolution.reason)
+        assertEquals(listOf("42"), gateway.requestedPublisherSnapshots)
     }
 
     @Test
@@ -2075,6 +2129,7 @@ class BilibiliPublisherPluginTest {
         val requestedVideos: MutableList<String> = CopyOnWriteArrayList()
         val requestedLiveRooms: MutableList<String> = CopyOnWriteArrayList()
         val expandedShortUrls: MutableList<String> = CopyOnWriteArrayList()
+        val requestedPublisherSnapshots: MutableList<String> = CopyOnWriteArrayList()
         val searchedPublishers: MutableList<Pair<String, Int>> = CopyOnWriteArrayList()
         val requestedPublisherBatches: MutableList<List<String>> = CopyOnWriteArrayList()
         val requestedRelations: MutableList<String> = CopyOnWriteArrayList()
@@ -2156,7 +2211,10 @@ class BilibiliPublisherPluginTest {
             return shortUrlExpansions[url]
         }
 
-        override suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot? = snapshot
+        override suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot? {
+            requestedPublisherSnapshots.add(userId)
+            return snapshot
+        }
 
         override suspend fun fetchPublisherSnapshots(userIds: Collection<String>): Map<String, BilibiliPublisherSnapshot> {
             val requested = userIds.toList()

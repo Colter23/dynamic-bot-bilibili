@@ -147,7 +147,10 @@ internal class BilibiliLinkResolver(
             }
             ?: return LinkResolution.Failed(parsedLink, "未找到 Bilibili 直播间：${parsedLink.targetId}")
 
-        val publisher = snapshot.userId.takeIf { it.isNotBlank() }?.let { publisherInfoResolver(it) }
+        val publisher = resolvePublisherInfo(
+            userId = snapshot.userId,
+            seed = publisherSeed(userId = snapshot.userId),
+        )
         return LinkResolution.Preview(
             parsedLink = parsedLink,
             preview = LinkPreview(
@@ -171,7 +174,13 @@ internal class BilibiliLinkResolver(
     }
 
     private suspend fun resolveUserPreview(parsedLink: ParsedLink): LinkResolution {
-        val publisher = runCatching { publisherInfoResolver(parsedLink.targetId) }
+        val publisher = runCatching {
+            resolvePublisherInfo(
+                userId = parsedLink.targetId,
+                seed = publisherSeed(userId = parsedLink.targetId),
+                requireRemote = true,
+            )
+        }
             .getOrElse { error ->
                 return LinkResolution.Failed(
                     parsedLink = parsedLink,
@@ -195,6 +204,22 @@ internal class BilibiliLinkResolver(
                 publisher = publisher,
             ),
         )
+    }
+
+    private suspend fun resolvePublisherInfo(
+        userId: String,
+        seed: PublisherInfo? = null,
+        requireRemote: Boolean = false,
+    ): PublisherInfo? {
+        val normalized = userId.trim().takeIf { it.isNotBlank() }
+            ?: return if (requireRemote) null else seed
+        val fetched = runCatching { publisherInfoResolver(normalized) }
+            .getOrElse { error ->
+                if (requireRemote) throw error
+                null
+            }
+        if (fetched == null) return if (requireRemote) null else seed
+        return seed?.let { mergePublisherInfo(fetched.copy(key = it.key), it) } ?: fetched
     }
 
     private fun parseDirectLink(inputUrl: String): ParsedLink? {
@@ -325,11 +350,33 @@ internal class BilibiliLinkResolver(
     }
 
     private fun BilibiliVideoSnapshot.toPublisherInfo(): PublisherInfo? {
-        if (ownerId.isBlank()) return null
+        return publisherSeed(
+            userId = ownerId,
+            name = ownerName,
+            avatarUrl = ownerFaceUrl,
+        )
+    }
+
+    private fun publisherSeed(
+        userId: String,
+        name: String = userId,
+        avatarUrl: String? = null,
+    ): PublisherInfo? {
+        val normalizedUserId = userId.trim().takeIf { it.isNotBlank() } ?: return null
         return PublisherInfo(
-            key = PublisherKey.of(platformId.value, PublisherKind.USER, ownerId),
-            name = ownerName.ifBlank { ownerId },
-            avatar = MediaRef(ownerFaceUrl.orEmpty(), MediaKind.AVATAR),
+            key = PublisherKey.of(platformId.value, PublisherKind.USER, normalizedUserId),
+            name = name.trim().ifBlank { normalizedUserId },
+            avatar = MediaRef(avatarUrl.orEmpty(), MediaKind.AVATAR),
+        )
+    }
+
+    private fun mergePublisherInfo(primary: PublisherInfo, fallback: PublisherInfo): PublisherInfo {
+        return primary.copy(
+            name = primary.name.ifBlank { fallback.name },
+            avatarBadgeKey = primary.avatarBadgeKey ?: fallback.avatarBadgeKey,
+            avatar = primary.avatar.takeIf { it.uri.isNotBlank() } ?: fallback.avatar,
+            banner = primary.banner ?: fallback.banner,
+            pendant = primary.pendant ?: fallback.pendant,
         )
     }
 
