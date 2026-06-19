@@ -50,7 +50,6 @@ import top.colter.dynamic.core.data.TargetKind
 import top.colter.dynamic.core.config.ConfigMigration
 import top.colter.dynamic.core.config.ConfigService
 import top.colter.dynamic.core.config.PluginDataStore
-import top.colter.dynamic.core.command.CommandPublisher
 import top.colter.dynamic.core.event.SourceUpdatePublishRequest
 import top.colter.dynamic.core.event.SourceUpdatePublishResult
 import top.colter.dynamic.core.event.SourceUpdatePublisher
@@ -118,7 +117,6 @@ class BilibiliPublisherPluginTest {
             dataStore = InMemoryPluginDataStore("bilibili-publisher"),
             scope = scope,
             taskScheduler = testScheduler(),
-            commandPublisher = CommandPublisher { },
             sourceUpdatePublisher = sourceUpdates,
             sourceStateStore = TestSourceStateStore,
             subscriptionQueryService = TestSubscriptions,
