@@ -1280,7 +1280,7 @@ internal class BilibiliPublisherRuntime() :
     private fun PublisherSubscribers.hasEnabledEvent(kind: SubscriptionEventKind): Boolean {
         return subscriptions.any { item ->
             item.subscription.state == EntityState.ACTIVE &&
-                item.subscriber.state == EntityState.ACTIVE &&
+                item.subscriber.state.allowsActiveDelivery &&
                 kind in item.subscription.policy.enabledEvents
         }
     }

@@ -41,6 +41,7 @@ import top.colter.dynamic.core.data.PublisherSubscribers
 import top.colter.dynamic.core.data.SourceCursor
 import top.colter.dynamic.core.data.SourceEventType
 import top.colter.dynamic.core.data.Subscriber
+import top.colter.dynamic.core.data.SubscriberState
 import top.colter.dynamic.core.data.Subscription
 import top.colter.dynamic.core.data.SubscriptionEventKind
 import top.colter.dynamic.core.data.SubscriptionPolicy
@@ -2580,7 +2581,7 @@ class BilibiliPublisherPluginTest {
                 id = existing?.id ?: nextSubscriberId++,
                 address = address,
                 name = name,
-                state = EntityState.ACTIVE,
+                state = SubscriberState.ACTIVE,
                 createTime = existing?.createTime ?: 1L,
                 createUser = existing?.createUser ?: 1,
             )
@@ -2625,7 +2626,7 @@ class BilibiliPublisherPluginTest {
                 .filter { it.publisherId == publisherId && it.state == EntityState.ACTIVE }
                 .mapNotNull { subscription ->
                     val subscriber = subscribers[subscription.subscriberId]
-                        ?.takeIf { it.state == EntityState.ACTIVE }
+                        ?.takeIf { it.state.allowsActiveDelivery }
                         ?: return@mapNotNull null
                     SubscriptionSubscriber(subscription, subscriber)
                 }
