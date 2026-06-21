@@ -16,8 +16,10 @@ import top.colter.bilibili.data.ImageUrl as BiliImageUrl
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.BiliDynamicList
 import top.colter.bilibili.data.dynamic.BiliDynamicModules
+import top.colter.bilibili.data.dynamic.content.DynamicMajor
 import top.colter.bilibili.data.dynamic.module.ModuleAuthor
 import top.colter.bilibili.data.dynamic.module.ModuleDynamic
+import top.colter.bilibili.data.dynamic.type.MajorType
 import top.colter.bilibili.data.dynamic.type.OriginDynamicType
 import top.colter.bilibili.data.login.QrCodeLoginData
 import top.colter.bilibili.data.login.QrCodeLoginResult
@@ -938,6 +940,71 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `polling should skip live dynamics from dynamic feed and advance cursor`() = runBlocking {
+        val scheduler = testScheduler()
+        val cursorStore = InMemoryCursorStore()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+        )
+        val sourceUpdates = RecordingSourceUpdatePublisher()
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(liveDetectionEnabled = false),
+            taskScheduler = scheduler,
+            cursorStore = cursorStore,
+        )
+
+        plugin.init(sourceUpdates)
+        plugin.start()
+        withTimeout(3_000) {
+            while ((scheduler.snapshot("bilibili-detect")?.runCount ?: 0L) == 0L) {
+                delay(10)
+            }
+        }
+
+        val seeded = seedPublisherAndSubscriber()
+        val subscription = seeded.subscription
+        val liveDynamic = buildDynamic(
+            epochSeconds = subscription.createdAtEpochSeconds + 1,
+            mid = seeded.publisher.externalId.toLong(),
+            name = seeded.publisher.name,
+            suffix = 11,
+            originType = OriginDynamicType.LIVE_RCMD,
+            majorType = MajorType.LIVE_RCMD,
+        )
+        val normalDynamic = buildDynamic(
+            epochSeconds = subscription.createdAtEpochSeconds + 2,
+            mid = seeded.publisher.externalId.toLong(),
+            name = seeded.publisher.name,
+            suffix = 12,
+        )
+        gateway.setDynamicPages(mapOf(1 to dynamicPage(false, normalDynamic, liveDynamic)))
+
+        plugin.onSubscriptionChanged(
+            SubscriptionChangedEvent(
+                changeType = SubscriptionChangeType.SUBSCRIBED,
+                subscription = subscription,
+                publisher = seeded.publisher,
+                subscriber = seeded.subscriber,
+                changedAtEpochSeconds = subscription.createdAtEpochSeconds,
+            )
+        )
+
+        val request = withTimeout(3_000) { sourceUpdates.receive() }
+        assertEquals(normalDynamic.id.toString(), request.update.key.externalId)
+        assertNull(withTimeoutOrNull(300) { sourceUpdates.receive() })
+        assertEquals(
+            listOf(liveDynamic.id.toString(), normalDynamic.id.toString()),
+            cursorStore.markedDynamicIds(seeded.publisher.id).takeLast(2),
+        )
+
+        plugin.stop()
+    }
+
+    @Test
     fun `replay should stop publisher batch when source update publish fails`() = runBlocking {
         val now = System.currentTimeMillis() / 1000
         val scheduler = testScheduler()
@@ -991,6 +1058,64 @@ class BilibiliPublisherPluginTest {
         assertEquals(failed.id.toString(), failedRequest.update.key.externalId)
         assertNull(withTimeoutOrNull(300) { sourceUpdates.receive() })
         assertEquals(emptyList(), cursorStore.markedDynamicIds(seeded.publisher.id))
+
+        plugin.stop()
+    }
+
+    @Test
+    fun `replay should skip live dynamics from dynamic feed and continue backfill`() = runBlocking {
+        val now = System.currentTimeMillis() / 1000
+        val scheduler = testScheduler()
+        val cursorStore = InMemoryCursorStore()
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "logged in"),
+            initialDynamicPages = emptyMap(),
+        )
+        val sourceUpdates = RecordingSourceUpdatePublisher()
+        val plugin = testPlugin(
+            gateway,
+            config = testConfig(replayWindowMinutes = 120, liveDetectionEnabled = false),
+            cursorStore = cursorStore,
+            taskScheduler = scheduler,
+        )
+
+        val seeded = seedPublisherAndSubscriber()
+        cursorStore.put(
+            seeded.publisher.id,
+            SourceCursor(
+                publisherId = seeded.publisher.id,
+                sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
+                eventType = SourceEventType.DYNAMIC_CREATED,
+                lastSeenUpdateKey = dynamicIdFor(now - 5_000L, 99),
+                lastSeenAtEpochSeconds = now - 5_000L,
+                recentUpdateKeys = emptyList(),
+            ),
+        )
+        val normalDynamic = buildDynamic(now - 3_600L, seeded.publisher.externalId.toLong(), "demo-up", 1)
+        val liveDynamic = buildDynamic(
+            epochSeconds = now - 3_700L,
+            mid = seeded.publisher.externalId.toLong(),
+            name = "demo-up",
+            suffix = 2,
+            originType = OriginDynamicType.LIVE,
+            majorType = MajorType.LIVE,
+        )
+        gateway.setDynamicPages(mapOf(1 to dynamicPage(false, normalDynamic, liveDynamic)))
+
+        plugin.init(sourceUpdates)
+        plugin.start()
+        waitForTaskRun(scheduler)
+
+        val request = withTimeout(3_000) { sourceUpdates.receive() }
+        assertEquals(normalDynamic.id.toString(), request.update.key.externalId)
+        assertNull(withTimeoutOrNull(300) { sourceUpdates.receive() })
+        assertEquals(
+            listOf(liveDynamic.id.toString(), normalDynamic.id.toString()),
+            cursorStore.markedDynamicIds(seeded.publisher.id),
+        )
 
         plugin.stop()
     }
@@ -2035,6 +2160,8 @@ class BilibiliPublisherPluginTest {
         mid: Long,
         name: String,
         suffix: Long,
+        originType: OriginDynamicType = OriginDynamicType.WORD,
+        majorType: MajorType? = null,
     ): BiliDynamic {
         val author = ModuleAuthor(
             mid = mid,
@@ -2042,11 +2169,13 @@ class BilibiliPublisherPluginTest {
             face = BiliImageUrl("https://example.com/$mid.png"),
         )
         return BiliDynamic(
-            originType = OriginDynamicType.WORD,
+            originType = originType,
             idStr = dynamicIdFor(epochSeconds, suffix),
             modules = BiliDynamicModules(
                 author = author,
-                dynamic = ModuleDynamic(),
+                dynamic = ModuleDynamic(
+                    major = majorType?.let { DynamicMajor(type = it) },
+                ),
             ),
         )
     }

@@ -3,6 +3,8 @@ package top.colter.dynamic.bilibili
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import top.colter.bilibili.data.dynamic.BiliDynamic
+import top.colter.bilibili.data.dynamic.type.MajorType
+import top.colter.bilibili.data.dynamic.type.OriginDynamicType
 import top.colter.dynamic.core.config.ConfigApplyResult
 import top.colter.dynamic.core.config.ConfigurablePlugin
 import top.colter.dynamic.core.config.loadOrCreate
@@ -535,6 +537,14 @@ internal class BilibiliPublisherRuntime() :
                         continue
                     }
 
+                    if (raw.isLiveDynamicFromDynamicFeed()) {
+                        logger.debug {
+                            "Bilibili 动态轮询跳过直播动态：publisher=${publisher.displayLabel()}，uid=$uid，dynamicId=$dynamicId"
+                        }
+                        cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
+                        continue
+                    }
+
                     val dynamic = mapper.map(raw, publisher) ?: continue
                     logger.info {
                         "Bilibili 检测到新动态：publisher=${publisher.displayLabel()}，uid=$uid，dynamicId=$dynamicId，time=${raw.time}"
@@ -715,6 +725,10 @@ internal class BilibiliPublisherRuntime() :
                 .forEach dynamicLoop@{ raw ->
                     val dynamicId = raw.id.toString()
                     if (raw.time < cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) {
+                        return@dynamicLoop
+                    }
+                    if (raw.isLiveDynamicFromDynamicFeed()) {
+                        cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
                         return@dynamicLoop
                     }
                     cursor = cursorStore.markSeen(publisherId, dynamicId, raw.time)
@@ -971,6 +985,14 @@ internal class BilibiliPublisherRuntime() :
                 if (raw.time < target.lowerBound) return@dynamicLoop
                 val dynamicId = raw.id.toString()
                 if (raw.time < cursor.lastSeenAtEpochSeconds || cursor.hasSeen(dynamicId)) return@dynamicLoop
+
+                if (raw.isLiveDynamicFromDynamicFeed()) {
+                    logger.debug {
+                        "Bilibili 历史补发跳过直播动态：publisher=${target.publisher.displayLabel()}，uid=${target.userId}，dynamicId=$dynamicId"
+                    }
+                    cursor = cursorStore.markSeen(target.publisher.id, dynamicId, raw.time)
+                    return@dynamicLoop
+                }
 
                 val dynamic = mapper.map(raw, target.publisher) ?: return@dynamicLoop
                 logger.debug {
@@ -1283,6 +1305,16 @@ internal class BilibiliPublisherRuntime() :
                 item.subscriber.state.allowsActiveDelivery &&
                 kind in item.subscription.policy.enabledEvents
         }
+    }
+
+    private fun BiliDynamic.isLiveDynamicFromDynamicFeed(): Boolean {
+        val major = modules.dynamic.major
+        return originType == OriginDynamicType.LIVE ||
+            originType == OriginDynamicType.LIVE_RCMD ||
+            major?.type == MajorType.LIVE ||
+            major?.type == MajorType.LIVE_RCMD ||
+            major?.live != null ||
+            major?.liveRcmd != null
     }
 
     private data class PublisherInterests(
