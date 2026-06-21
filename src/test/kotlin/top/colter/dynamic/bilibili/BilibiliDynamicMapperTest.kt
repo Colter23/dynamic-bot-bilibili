@@ -135,6 +135,59 @@ class BilibiliDynamicMapperTest {
     }
 
     @Test
+    fun `map should preserve newline-only text nodes between image emoji`() {
+        fun emojiNode(value: String): RichTextNode {
+            return RichTextNode(
+                type = RichTextType.EMOJI,
+                origText = value,
+                text = value,
+                emoji = RichTextNode.Emoji(
+                    type = 1,
+                    iconUrl = BiliImageUrl("https://example.com/$value.png"),
+                    size = 1,
+                    text = value,
+                ),
+            )
+        }
+
+        val source = dynamic(
+            id = "123456791",
+            type = OriginDynamicType.WORD,
+            dynamic = ModuleDynamic(
+                desc = DynamicDesc(
+                    richTextNodes = listOf(
+                        RichTextNode(
+                            type = RichTextType.TEXT,
+                            origText = "测试",
+                            text = "测试",
+                        ),
+                        emojiNode("[emoji1]"),
+                        emojiNode("[emoji2]"),
+                        emojiNode("[emoji3]"),
+                        RichTextNode(
+                            type = RichTextType.TEXT,
+                            origText = "\n\n\n",
+                            text = "\n\n\n",
+                        ),
+                        emojiNode("[emoji4]"),
+                        emojiNode("[emoji5]"),
+                        emojiNode("[emoji6]"),
+                    ),
+                    text = "测试[emoji1][emoji2][emoji3]\n\n\n[emoji4][emoji5][emoji6]",
+                ),
+            ),
+        )
+
+        val mapped = assertIs<DynamicPayload>(assertNotNull(mapper.map(source, fallbackPublisher())).payload)
+        val textBlock = mapped.blocks.filterIsInstance<TextBlock>().single()
+
+        assertEquals("测试[emoji1][emoji2][emoji3]\n\n\n[emoji4][emoji5][emoji6]", textBlock.content.plainText)
+        assertIs<DynamicContentNodeEmoji>(textBlock.content.nodes[1])
+        assertEquals("\n\n\n", textBlock.content.nodes[4].text)
+        assertIs<DynamicContentNodeEmoji>(textBlock.content.nodes[5])
+    }
+
+    @Test
     fun `map should infer dynamic image badges`() {
         val source = dynamic(
             id = "123456790",

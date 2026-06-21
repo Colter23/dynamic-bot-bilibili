@@ -187,7 +187,10 @@ internal class BilibiliDynamicMapper {
     }
 
     private fun RichTextNode.toDynamicContentNode(): DynamicContentNode? {
-        val displayText = text.takeIfNotBlank() ?: origText.takeIfNotBlank() ?: return null
+        val displayText = when (type) {
+            RichTextType.TEXT -> text.takeIfNotEmpty() ?: origText.takeIfNotEmpty() ?: return null
+            else -> text.takeIfNotBlank() ?: origText.takeIfNotBlank() ?: return null
+        }
         return when (type) {
             RichTextType.TEXT -> DynamicContentNodeText(displayText)
             RichTextType.EMOJI -> emoji?.iconUrl?.toCoreImageOrNull(MediaKind.EMOJI)
@@ -726,6 +729,10 @@ internal class BilibiliDynamicMapper {
 
     private fun String?.takeIfNotBlank(): String? {
         return this?.takeIf { it.isNotBlank() }
+    }
+
+    private fun String?.takeIfNotEmpty(): String? {
+        return this?.takeIf { it.isNotEmpty() }
     }
 
     private fun String.ensureTopicText(): String {
