@@ -885,8 +885,6 @@ internal class BilibiliPollService(
                 connection.requestMethod = "GET"
                 connection.connectTimeout = timeoutMs
                 connection.readTimeout = timeoutMs
-                //connection.setRequestProperty("User-Agent", USER_AGENT)
-
                 val statusCode = connection.responseCode
                 if (statusCode in HTTP_REDIRECT_RANGE) {
                     val location = connection.getHeaderField("Location") ?: return null
@@ -907,7 +905,6 @@ internal class BilibiliPollService(
         private const val BILIBILI_HOME: String = "https://www.bilibili.com"
         private const val QR_EXPIRES_SECONDS: Long = 180
         private const val MAX_SHORT_URL_REDIRECTS: Int = 5
-        private const val USER_AGENT: String = "dynamic-bot/0.0.4"
         private const val FOLLOWING_ATTRIBUTE: Int = 2
         private val HTTP_REDIRECT_RANGE: IntRange = 300..399
 
