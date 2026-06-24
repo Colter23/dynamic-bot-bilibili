@@ -210,7 +210,6 @@ internal class BilibiliDynamicMapper {
             )
             RichTextType.TOPIC -> DynamicContentNodeTag(
                 text = displayText,
-                icon = contentIcon(PlatformDrawAssetKeys.ContentIcon.TOPIC, "话题"),
                 tagType = DynamicContentTagType.TOPIC,
                 externalId = rid,
                 url = jumpUrl.toNormalizedUrlOrNull(),
