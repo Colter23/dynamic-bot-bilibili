@@ -11,6 +11,7 @@ import top.colter.bilibili.api.getDynamicDetail
 import top.colter.bilibili.api.getLiveInfo
 import top.colter.bilibili.api.getLiveStatusBatch
 import top.colter.bilibili.api.getNewDynamic
+import top.colter.bilibili.api.getUserNewDynamic
 import top.colter.bilibili.api.getGroupList
 import top.colter.bilibili.api.getUserInfo
 import top.colter.bilibili.api.getUserInfoBatch
@@ -148,6 +149,10 @@ internal interface BilibiliPlatformGateway {
 
     suspend fun fetchNewDynamicPage(page: Int = 1, type: String = "all"): BiliDynamicList {
         throw UnsupportedOperationException("不支持拉取动态列表")
+    }
+
+    suspend fun fetchUserNewDynamic(userId: Long): BiliDynamicList {
+        throw UnsupportedOperationException("不支持拉取用户动态列表")
     }
 
     suspend fun fetchDynamicDetail(dynamicId: String): BiliDynamic? {
@@ -315,6 +320,10 @@ internal class BilibiliPollService(
 
     override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
         return callWithRequestDelay { client.getNewDynamic(page, type) }
+    }
+
+    override suspend fun fetchUserNewDynamic(userId: Long): BiliDynamicList {
+        return callWithRequestDelay { client.getUserNewDynamic(userId) }
     }
 
     override suspend fun fetchDynamicDetail(dynamicId: String): BiliDynamic? {

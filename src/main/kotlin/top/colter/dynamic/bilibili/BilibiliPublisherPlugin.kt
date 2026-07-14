@@ -21,6 +21,9 @@ import top.colter.dynamic.core.plugin.PublisherLoginProvider
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
 import top.colter.dynamic.core.plugin.PublisherBatchLookupPlugin
+import top.colter.dynamic.core.plugin.PublisherLatestUpdateProvider
+import top.colter.dynamic.core.plugin.PublisherLatestUpdateRequest
+import top.colter.dynamic.core.plugin.PublisherLatestUpdateResult
 import top.colter.dynamic.core.plugin.PublisherLookupPlugin
 import top.colter.dynamic.core.plugin.PublisherSourcePlugin
 import top.colter.dynamic.core.task.TaskScheduler
@@ -35,6 +38,7 @@ public class BilibiliPublisherPlugin private constructor(
     PublisherLoginProvider,
     LinkResolver,
     LinkVideoDownloader,
+    PublisherLatestUpdateProvider,
     ConfigurablePlugin<BilibiliPublisherConfig> {
 
     public constructor() : this(BilibiliPublisherRuntime())
@@ -102,6 +106,12 @@ public class BilibiliPublisherPlugin private constructor(
 
     override suspend fun fetchPublisherInfo(userId: String): PublisherInfo? {
         return runtime.fetchPublisherInfo(userId)
+    }
+
+    override suspend fun fetchLatestPublisherUpdate(
+        request: PublisherLatestUpdateRequest,
+    ): PublisherLatestUpdateResult {
+        return runtime.fetchLatestPublisherUpdate(request)
     }
 
     override suspend fun fetchPublisherInfos(userIds: Collection<String>): Map<String, PublisherInfo> {

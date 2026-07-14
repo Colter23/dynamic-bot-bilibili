@@ -54,6 +54,8 @@ import top.colter.dynamic.core.plugin.PublisherLoginProvider
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
+import top.colter.dynamic.core.plugin.PublisherLatestUpdateRequest
+import top.colter.dynamic.core.plugin.PublisherLatestUpdateResult
 import top.colter.dynamic.core.plugin.PublisherLookupPlugin
 import top.colter.dynamic.core.plugin.PublisherSourcePlugin
 import top.colter.dynamic.core.plugin.SubscriptionQueryService
@@ -431,6 +433,44 @@ internal class BilibiliPublisherRuntime() :
         return requestFailureHandler.run("视频下载 id=${request.parsedLink.targetId}") {
             pollService.downloadVideoLink(request)
         }.getOrThrow()
+    }
+
+    internal suspend fun fetchLatestPublisherUpdate(
+        request: PublisherLatestUpdateRequest,
+    ): PublisherLatestUpdateResult {
+        val userId = parseLatestPublisherUserId(request.publisherInput)
+            ?: return PublisherLatestUpdateResult.Failed("请输入有效的 Bilibili UID 或空间链接")
+        ensurePollServiceReady()
+        val dynamics = runBilibiliRequest("手动查询最新动态 uid=$userId") {
+            pollService.fetchUserNewDynamic(userId)
+        }.getOrElse { error ->
+            return PublisherLatestUpdateResult.Failed(error.message ?: "请求 Bilibili 动态接口失败")
+        }
+        val latest = dynamics.items.firstOrNull { dynamic ->
+            dynamic.mid == userId && !dynamic.isLiveDynamicFromDynamicFeed()
+        } ?: return PublisherLatestUpdateResult.Empty("未找到该 UP 主可展示的最新动态")
+        val update = mapper.map(latest, manualQueryFallbackPublisher(userId))
+            ?: return PublisherLatestUpdateResult.Failed("无法读取最新动态内容")
+        return PublisherLatestUpdateResult.Found(update)
+    }
+
+    private fun parseLatestPublisherUserId(input: String): Long? {
+        val value = input.trim()
+        val userId = value.toLongOrNull() ?: BILIBILI_SPACE_URL_PATTERN.matchEntire(value)?.groupValues?.get(1)?.toLongOrNull()
+        return userId?.takeIf { it > 0 }
+    }
+
+    private fun manualQueryFallbackPublisher(userId: Long): Publisher {
+        val externalId = userId.toString()
+        return dynamicPublishers.values.firstOrNull { it.externalId == externalId }
+            ?: Publisher(
+                id = 0,
+                key = PublisherKey.of(platformId.value, PublisherKind.USER, externalId),
+                name = "UP 主 $externalId",
+                avatar = MediaRef("https://i0.hdslb.com/bfs/face/member/noface.jpg", MediaKind.AVATAR),
+                createTime = 0,
+                createUser = 0,
+            )
     }
 
     override suspend fun loginByCookie(cookie: String): PublisherLoginResult {
@@ -1353,6 +1393,10 @@ internal class BilibiliPublisherRuntime() :
         private const val BILIBILI_HOME: String = "https://www.bilibili.com"
         private const val BILIBILI_LIVE_HOME: String = "https://live.bilibili.com"
         private const val DAILY_MAINTENANCE_CRON: String = "20 4 * * *"
+        private val BILIBILI_SPACE_URL_PATTERN: Regex = Regex(
+            """(?:https?://)?space\.bilibili\.com/(\d+)(?:[/?#].*)?""",
+            RegexOption.IGNORE_CASE,
+        )
         private val BILIBILI_PLATFORM: PlatformDescriptor = PlatformDescriptor.of(
             id = "bilibili",
             displayName = "Bilibili",

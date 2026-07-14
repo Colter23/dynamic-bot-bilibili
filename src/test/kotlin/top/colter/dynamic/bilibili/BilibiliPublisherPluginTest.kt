@@ -71,6 +71,8 @@ import top.colter.dynamic.core.plugin.PluginContext
 import top.colter.dynamic.core.plugin.PluginDescriptor
 import top.colter.dynamic.core.plugin.SourceStateStore
 import top.colter.dynamic.core.plugin.SubscriptionQueryService
+import top.colter.dynamic.core.plugin.PublisherLatestUpdateRequest
+import top.colter.dynamic.core.plugin.PublisherLatestUpdateResult
 import top.colter.dynamic.core.task.TaskDefinition
 import top.colter.dynamic.core.task.TaskSchedule
 import top.colter.dynamic.core.task.TaskScheduler
@@ -167,6 +169,35 @@ class BilibiliPublisherPluginTest {
         assertEquals("123", profile?.externalId)
         assertEquals("demo-up", profile?.name)
         assertEquals("https://example.com/face.png", profile?.avatar?.uri)
+    }
+
+    @Test
+    fun `latest update provider should query requested up and skip live card`() = runBlocking {
+        val userId = 123L
+        val liveDynamic = buildDynamic(
+            epochSeconds = System.currentTimeMillis() / 1_000,
+            mid = userId,
+            name = "demo-up",
+            suffix = 1,
+            originType = OriginDynamicType.LIVE,
+        )
+        val dynamic = buildDynamic(
+            epochSeconds = System.currentTimeMillis() / 1_000,
+            mid = userId,
+            name = "demo-up",
+            suffix = 2,
+        )
+        val gateway = defaultGateway(userDynamicPages = mapOf(userId to dynamicPage(false, liveDynamic, dynamic)))
+        val plugin = testPlugin(gateway, taskScheduler = testScheduler(autoRun = false))
+        plugin.init()
+        val result = plugin.fetchLatestPublisherUpdate(
+            PublisherLatestUpdateRequest("https://space.bilibili.com/$userId"),
+        )
+
+        val found = assertIs<PublisherLatestUpdateResult.Found>(result)
+        assertEquals(listOf(userId), gateway.requestedUserDynamicIds)
+        assertEquals("demo-up", found.update.publisher.name)
+        assertEquals(dynamic.id.toString(), found.update.key.externalId)
     }
 
     @Test
@@ -2116,6 +2147,7 @@ class BilibiliPublisherPluginTest {
     private fun defaultGateway(
         snapshot: BilibiliPublisherSnapshot? = null,
         dynamicDetails: Map<String, BiliDynamic> = emptyMap(),
+        userDynamicPages: Map<Long, BiliDynamicList> = emptyMap(),
         shortUrlExpansions: Map<String, String?> = emptyMap(),
         videoSnapshots: Map<String, BilibiliVideoSnapshot> = emptyMap(),
         liveRoomSnapshots: Map<String, BilibiliLiveRoomSnapshot> = emptyMap(),
@@ -2125,6 +2157,7 @@ class BilibiliPublisherPluginTest {
             followState = FollowState.FOLLOWING,
             followActionResult = FollowActionResult(FollowActionStatus.DONE),
             dynamicDetails = dynamicDetails,
+            initialUserDynamicPages = userDynamicPages,
             shortUrlExpansions = shortUrlExpansions,
             videoSnapshots = videoSnapshots,
             liveRoomSnapshots = liveRoomSnapshots,
@@ -2231,6 +2264,7 @@ class BilibiliPublisherPluginTest {
             "unfollowed",
         ),
         initialDynamicPages: Map<Int, BiliDynamicList> = emptyMap(),
+        initialUserDynamicPages: Map<Long, BiliDynamicList> = emptyMap(),
         failingDynamicPages: Set<Int> = emptySet(),
         private val dynamicPageFailure: Throwable? = null,
         initialGroups: List<BiliGroup> = emptyList(),
@@ -2242,12 +2276,14 @@ class BilibiliPublisherPluginTest {
     ) : BilibiliPlatformGateway {
         private val groups: MutableList<BiliGroup> = initialGroups.toMutableList()
         private val dynamicPages: MutableMap<Int, BiliDynamicList> = initialDynamicPages.toMutableMap()
+        private val userDynamicPages: MutableMap<Long, BiliDynamicList> = initialUserDynamicPages.toMutableMap()
         private val dynamicPageFailures: MutableSet<Int> = failingDynamicPages.toMutableSet()
         private val liveSnapshots: MutableMap<Long, BilibiliLiveSnapshot> = initialLiveSnapshots.toMutableMap()
         private val liveBatchFailures: MutableSet<List<Long>> = failingLiveBatches.map { it.toList() }.toMutableSet()
         private var nextGroupId: Long = (groups.maxOfOrNull { it.tid } ?: 0L) + 1L
 
         val requestedPages: MutableList<Int> = CopyOnWriteArrayList()
+        val requestedUserDynamicIds: MutableList<Long> = CopyOnWriteArrayList()
         val requestedLiveBatches: MutableList<List<Long>> = CopyOnWriteArrayList()
         var groupFetchCount: Int = 0
             private set
@@ -2280,6 +2316,17 @@ class BilibiliPublisherPluginTest {
                 throw dynamicPageFailure ?: IllegalStateException("dynamic page failed: $page")
             }
             return dynamicPages[page] ?: BiliDynamicList(
+                hasMore = false,
+                offset = "",
+                updateBaseline = "",
+                updateNum = "0",
+                items = emptyList(),
+            )
+        }
+
+        override suspend fun fetchUserNewDynamic(userId: Long): BiliDynamicList {
+            requestedUserDynamicIds.add(userId)
+            return userDynamicPages[userId] ?: BiliDynamicList(
                 hasMore = false,
                 offset = "",
                 updateBaseline = "",
