@@ -29,7 +29,7 @@ internal class BilibiliFollowService(
     }
 
     suspend fun queryFollowState(userId: String): FollowState {
-        return requestFailureHandler.run("关注状态查询 uid=$userId") {
+        return requestFailureHandler.run("关注状态查询 uid=$userId", confirmsLogin = true) {
             gateway.queryFollowState(userId)
         }.getOrElse { FollowState.UNSUPPORTED }
     }
@@ -41,7 +41,7 @@ internal class BilibiliFollowService(
             val userId = ids.single()
             return mapOf(userId to queryFollowState(userId))
         }
-        return requestFailureHandler.run("批量关注状态查询 count=${ids.size}") {
+        return requestFailureHandler.run("批量关注状态查询 count=${ids.size}", confirmsLogin = true) {
             val relations = fetchFollowRelationsWithEmptyFallback(ids)
             ids.associateWith { userId ->
                 val relation = relations[userId]
@@ -64,7 +64,7 @@ internal class BilibiliFollowService(
             return FollowActionResult(FollowActionStatus.FAILED, "无效的 Bilibili 用户 ID：$normalized")
         }
 
-        val relation = requestFailureHandler.run("关注关系查询 uid=$normalized") {
+        val relation = requestFailureHandler.run("关注关系查询 uid=$normalized", confirmsLogin = true) {
             gateway.fetchFollowRelation(normalized)
         }.getOrElse { error ->
             return FollowActionResult(
@@ -78,7 +78,7 @@ internal class BilibiliFollowService(
             return FollowActionResult(FollowActionStatus.NOOP)
         }
 
-        val result = requestFailureHandler.run("关注发布者 uid=$normalized") {
+        val result = requestFailureHandler.run("关注发布者 uid=$normalized", confirmsLogin = true) {
             gateway.followPublisher(normalized)
         }.getOrElse { error ->
             return FollowActionResult(
@@ -96,7 +96,7 @@ internal class BilibiliFollowService(
         val ids = normalizeUserIds(userIds)
         if (ids.isEmpty()) return emptyMap()
 
-        val relations = requestFailureHandler.run("批量关注状态查询 count=${ids.size}") {
+        val relations = requestFailureHandler.run("批量关注状态查询 count=${ids.size}", confirmsLogin = true) {
             fetchFollowRelationsWithEmptyFallback(ids)
         }.getOrElse { error ->
             return ids.associateWith {
@@ -125,7 +125,7 @@ internal class BilibiliFollowService(
 
         val groupCandidates = alreadyFollowing.toMutableList()
         if (toFollow.isNotEmpty()) {
-            val result = requestFailureHandler.run("批量关注发布者 count=${toFollow.size}") {
+            val result = requestFailureHandler.run("批量关注发布者 count=${toFollow.size}", confirmsLogin = true) {
                 gateway.followPublishers(toFollow)
             }.getOrElse { error ->
                 return ids.associateWith { userId ->
@@ -179,7 +179,7 @@ internal class BilibiliFollowService(
         val groupId = findExistingFollowGroupId()
             ?: return skipAutoUnfollow(userId, "未配置或未找到 Bot 关注分组")
 
-        val relation = requestFailureHandler.run("关注关系查询 uid=$userId") {
+        val relation = requestFailureHandler.run("关注关系查询 uid=$userId", confirmsLogin = true) {
             gateway.fetchFollowRelation(userId)
         }.getOrNull() ?: return skipAutoUnfollow(userId, "关注关系查询失败")
 
@@ -190,7 +190,7 @@ internal class BilibiliFollowService(
             return skipAutoUnfollow(userId, "UP 主不只属于 Bot 关注分组：tagIds=${relation.tagIds}，botGroupId=$groupId")
         }
 
-        val result = requestFailureHandler.run("取消关注发布者 uid=$userId") {
+        val result = requestFailureHandler.run("取消关注发布者 uid=$userId", confirmsLogin = true) {
             gateway.unfollowPublisher(userId)
         }.getOrElse { error ->
             return FollowActionResult(
@@ -219,7 +219,7 @@ internal class BilibiliFollowService(
         val groupId = ensureFollowGroupId() ?: return
         val uids = userIds.mapNotNull { it.toLongOrNull() }.distinct()
         if (uids.isEmpty()) return
-        requestFailureHandler.run("批量加入关注分组 count=${uids.size} groupId=$groupId") {
+        requestFailureHandler.run("批量加入关注分组 count=${uids.size} groupId=$groupId", confirmsLogin = true) {
             gateway.addUsersToFollowGroup(uids, listOf(groupId))
         }.onFailure { error ->
             if (!error.isMissingBilibiliCsrfToken()) {
@@ -255,7 +255,7 @@ internal class BilibiliFollowService(
     }
 
     private suspend fun resolveFollowGroupId(groupName: String, createIfMissing: Boolean): Long? {
-        val existingGroups = requestFailureHandler.run("读取关注分组 name=$groupName") {
+        val existingGroups = requestFailureHandler.run("读取关注分组 name=$groupName", confirmsLogin = true) {
             gateway.fetchFollowGroups()
         }.getOrNull() ?: return null
 
@@ -273,7 +273,7 @@ internal class BilibiliFollowService(
             return null
         }
 
-        requestFailureHandler.run("创建关注分组 name=$groupName") {
+        requestFailureHandler.run("创建关注分组 name=$groupName", confirmsLogin = true) {
             gateway.createFollowGroup(groupName)
         }.onFailure { error ->
             if (error.isMissingBilibiliCsrfToken()) {
@@ -285,7 +285,7 @@ internal class BilibiliFollowService(
             }
         }
 
-        val refreshedGroups = requestFailureHandler.run("重新读取关注分组 name=$groupName") {
+        val refreshedGroups = requestFailureHandler.run("重新读取关注分组 name=$groupName", confirmsLogin = true) {
             gateway.fetchFollowGroups()
         }.getOrNull() ?: return null
 

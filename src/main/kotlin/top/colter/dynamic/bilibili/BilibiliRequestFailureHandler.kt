@@ -31,11 +31,12 @@ internal class BilibiliRequestFailureHandler(
 
     suspend fun <T> run(
         operation: String,
+        confirmsLogin: Boolean = false,
         block: suspend () -> T,
     ): Result<T> {
         return try {
             val result = block()
-            recordSuccess(operation)
+            recordSuccess(operation, confirmsLogin)
             Result.success(result)
         } catch (error: Throwable) {
             recordFailure(operation, error)
@@ -43,18 +44,24 @@ internal class BilibiliRequestFailureHandler(
         }
     }
 
-    suspend fun recordSuccess(operation: String) {
+    /**
+     * 只有必须使用已登录会话的接口才能清除未登录失败计数。
+     * 直播状态等公共接口会在 Cookie 失效后继续成功响应。
+     */
+    suspend fun recordSuccess(operation: String, confirmsLogin: Boolean = true) {
         val wasPausedByLogin = pollingPausedByLoginFailure
         val wasPausedByRequestBlock = requestBlockPausedUntilMillis != null
-        if (consecutiveLoginFailures > 0 || wasPausedByLogin || wasPausedByRequestBlock) {
+        if ((confirmsLogin && (consecutiveLoginFailures > 0 || wasPausedByLogin)) || wasPausedByRequestBlock) {
             requestFailureLogger.info {
                 "Bilibili 请求已恢复：operation=$operation，之前连续未登录失败=$consecutiveLoginFailures，之前风控冷却=${wasPausedByRequestBlock}"
             }
         }
-        consecutiveLoginFailures = 0
-        pollingPausedByLoginFailure = false
+        if (confirmsLogin) {
+            consecutiveLoginFailures = 0
+            pollingPausedByLoginFailure = false
+        }
         requestBlockPausedUntilMillis = null
-        if (wasPausedByLogin) {
+        if (wasPausedByLogin && confirmsLogin) {
             publishNotification(
                 SystemNotificationPublishRequest(
                     type = "bilibili.login_recovered",

@@ -78,6 +78,28 @@ class BilibiliRequestFailureHandlerTest {
     }
 
     @Test
+    fun `public endpoint success should not clear login failure count`() = runBlocking {
+        val requests = mutableListOf<SystemNotificationPublishRequest>()
+        val handler = BilibiliRequestFailureHandler(
+            configProvider = {
+                BilibiliPublisherConfig(maxConsecutiveLoginFailures = 2)
+            },
+            notificationPublisher = SystemNotificationPublisher { request ->
+                requests += request
+                SystemNotificationPublishResult.accepted()
+            },
+        )
+
+        handler.recordFailure("动态轮询", BiliLoginException("cookie expired"))
+        handler.run("直播状态拉取", confirmsLogin = false) { Unit }
+        handler.recordFailure("动态轮询", BiliLoginException("cookie expired"))
+
+        assertTrue(handler.isPollingPaused())
+        assertEquals(1, requests.size)
+        assertEquals("bilibili.login_paused", requests.single().type)
+    }
+
+    @Test
     fun `request block should pause polling for configured cooldown and recover on success`() = runBlocking {
         val requests = mutableListOf<SystemNotificationPublishRequest>()
         var now = 1_000L

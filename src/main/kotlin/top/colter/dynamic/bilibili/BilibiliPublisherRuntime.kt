@@ -529,9 +529,10 @@ internal class BilibiliPublisherRuntime() :
 
     private suspend fun <T> runBilibiliRequest(
         operation: String,
+        confirmsLogin: Boolean = false,
         block: suspend () -> T,
     ): Result<T> {
-        return requestFailureHandler.run(operation, block)
+        return requestFailureHandler.run(operation, confirmsLogin, block)
     }
 
     private suspend fun detectAndPublishLocked(skipLiveDetection: Boolean) {
@@ -607,7 +608,7 @@ internal class BilibiliPublisherRuntime() :
     // 常规轮询只取关注动态流首页，避免长期未更新的订阅游标把每轮检测拖入深分页。
     // 需要补发历史动态时，使用 replayWindowMinutes 触发启动补发流程。
     private suspend fun collectPolledDynamics(): List<BiliDynamic> {
-        val pageResult = runBilibiliRequest("动态轮询 page=1") {
+        val pageResult = runBilibiliRequest("动态轮询 page=1", confirmsLogin = true) {
             pollService.fetchNewDynamicPage(1)
         }.getOrElse {
             return emptyList()
@@ -741,7 +742,9 @@ internal class BilibiliPublisherRuntime() :
         val publisherSnapshot = dynamicPublishers
         if (publisherSnapshot.isEmpty()) return
 
-        val followedDynamics = runBilibiliRequest("动态游标预热") { pollService.fetchNewDynamicPage(1).items }
+        val followedDynamics = runBilibiliRequest("动态游标预热", confirmsLogin = true) {
+            pollService.fetchNewDynamicPage(1).items
+        }
             .getOrElse { emptyList() }
         if (followedDynamics.isEmpty()) return
 
@@ -983,7 +986,7 @@ internal class BilibiliPublisherRuntime() :
 
         var page = 1
         while (true) {
-            val pageFetch = runBilibiliRequest("历史动态补发 page=$page") {
+            val pageFetch = runBilibiliRequest("历史动态补发 page=$page", confirmsLogin = true) {
                 pollService.fetchNewDynamicPage(page)
             }
             if (pageFetch.isFailure) {
