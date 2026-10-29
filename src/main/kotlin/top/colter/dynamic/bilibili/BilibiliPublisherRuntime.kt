@@ -2,6 +2,7 @@ package top.colter.dynamic.bilibili
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.type.MajorType
 import top.colter.bilibili.data.dynamic.type.OriginDynamicType
@@ -143,10 +144,26 @@ internal class BilibiliPublisherRuntime() :
     @Volatile
     private var pendingDetectionSkipLive: Boolean = false
 
+    /**
+     * 当前检测轮次开始时间。0 表示没有轮次在执行。
+     * 用于识别“检测长时间未结束”的卡死状态，避免只靠 DEBUG 日志静默跳过。
+     */
+    @Volatile
+    private var detectRoundStartedAtMillis: Long = 0L
+
+    @Volatile
+    private var lastDetectStallWarnAtMillis: Long = 0L
+
+    @Volatile
+    private var detectStallNotified: Boolean = false
+
     private var startupFollowGroupPending: Boolean = false
     private var startupReplayPending: Boolean = false
     private var startupCursorWarmupPending: Boolean = false
     private var startupLiveWarmupPending: Boolean = false
+
+    /** 启动补发连续超时次数，用于避免每轮都把时间耗在注定跑不完的补发上。 */
+    private var startupBootstrapTimeouts: Int = 0
 
     internal constructor(
         loadConfig: (String) -> BilibiliPublisherConfig,
@@ -508,23 +525,129 @@ internal class BilibiliPublisherRuntime() :
             if (skipLiveDetection) {
                 pendingDetectionSkipLive = true
             }
-            logger.debug { "Bilibili 检测仍在执行，本轮已标记为补跑" }
+            reportDetectRoundStillRunning()
             return
         }
 
+        detectRoundStartedAtMillis = System.currentTimeMillis()
         try {
-            var skipLiveForCurrentRun = skipLiveDetection
-            do {
-                val skipLiveForRun = skipLiveForCurrentRun || pendingDetectionSkipLive
-                pendingDetection = false
-                pendingDetectionSkipLive = false
-                skipLiveForCurrentRun = false
-                detectAndPublishLocked(skipLiveForRun)
-            } while (pendingDetection)
-            persistRuntimeCookiesIfChanged()
+            // 启动引导（补发/预热）单独计时：它可能很长但必须能跑完，
+            // 用轮询超时去卡它会把补发截断，而且计划已被取走、无法重试。
+            val startupLiveWarmupAttempted = runStartupBootstrapPhase()
+
+            // 单轮超时是兜底：正常检测应在数十秒内结束。一旦某个请求或绘图挂住，
+            // 必须让锁释放并留下 ERROR 日志，而不是让后续每轮都只打 DEBUG 静默跳过。
+            val completed = withTimeoutOrNull(DETECT_ROUND_TIMEOUT_MILLIS) {
+                var skipLiveForCurrentRun = skipLiveDetection
+                do {
+                    val skipLiveForRun = skipLiveForCurrentRun || pendingDetectionSkipLive
+                    pendingDetection = false
+                    pendingDetectionSkipLive = false
+                    skipLiveForCurrentRun = false
+                    detectAndPublishLocked(skipLiveForRun, startupLiveWarmupAttempted)
+                } while (pendingDetection)
+                persistRuntimeCookiesIfChanged()
+                true
+            }
+            if (completed == null) {
+                logger.error {
+                    "Bilibili 检测单轮超时，已放弃本轮并释放检测锁：timeoutMs=$DETECT_ROUND_TIMEOUT_MILLIS"
+                }
+                publishNotification(
+                    SystemNotificationPublishRequest(
+                        type = "bilibili.detect_round_timeout",
+                        severity = SystemNotificationSeverity.ERROR,
+                        title = "Bilibili 检测超时",
+                        content = "Bilibili 单轮检测超过 ${DETECT_ROUND_TIMEOUT_MILLIS / 60_000} 分钟仍未结束，已放弃本轮。",
+                        dedupeKey = "bilibili.detect_round_timeout:$pluginId",
+                    ),
+                )
+            }
         } finally {
+            detectRoundStartedAtMillis = 0L
+            detectStallNotified = false
             detectMutex.unlock()
         }
+    }
+
+    /**
+     * 启动阶段（关注分组初始化、历史补发、游标/直播预热）单独计时。
+     * 补发量大时单轮可能远超轮询超时，所以给它更宽的预算；万一真的卡住，
+     * 重新排队让下一轮继续，而不是把剩余补发直接丢掉。
+     */
+    private suspend fun runStartupBootstrapPhase(): Boolean {
+        val completed = withTimeoutOrNull(DETECT_BOOTSTRAP_TIMEOUT_MILLIS) {
+            runStartupBootstrapIfPending()
+        }
+        if (completed != null) {
+            startupBootstrapTimeouts = 0
+            return completed
+        }
+
+        startupBootstrapTimeouts += 1
+        val canRetry = startupBootstrapTimeouts <= MAX_STARTUP_BOOTSTRAP_TIMEOUTS
+        if (canRetry) {
+            requeueReplayAfterBootstrapTimeout()
+            logger.warn {
+                "Bilibili 启动补发/预热超过 ${DETECT_BOOTSTRAP_TIMEOUT_MILLIS / 60_000} 分钟未完成，本轮中止；" +
+                    "已重新排队，下一轮继续（连续超时=${startupBootstrapTimeouts}/$MAX_STARTUP_BOOTSTRAP_TIMEOUTS）。"
+            }
+        } else {
+            logger.error {
+                "Bilibili 启动补发/预热连续 ${startupBootstrapTimeouts} 次超时，已放弃本次补发；" +
+                    "正常轮询继续执行。"
+            }
+            publishNotification(
+                SystemNotificationPublishRequest(
+                    type = "bilibili.bootstrap_abandoned",
+                    severity = SystemNotificationSeverity.ERROR,
+                    title = "Bilibili 启动补发已放弃",
+                    content = "Bilibili 启动补发连续 ${startupBootstrapTimeouts} 次超时，已放弃；历史动态可能未补全。",
+                    dedupeKey = "bilibili.bootstrap_abandoned:$pluginId",
+                ),
+            )
+        }
+        return false
+    }
+
+    private fun requeueReplayAfterBootstrapTimeout() {
+        if (config.replayWindowMinutes <= 0) return
+        synchronized(startupBootstrapLock) {
+            startupReplayPending = true
+            startupCursorWarmupPending = false
+        }
+    }
+
+    /**
+     * 检测锁被占用时调用。上一轮尚未结束属于正常的补跑，但持续过久说明上一轮已经卡住，
+     * 必须让它在 WARN 日志和系统通知里可见，否则整个插件会静默停止推送。
+     */
+    private suspend fun reportDetectRoundStillRunning() {
+        val startedAt = detectRoundStartedAtMillis
+        val now = System.currentTimeMillis()
+        val elapsedMillis = if (startedAt > 0L) now - startedAt else 0L
+        if (elapsedMillis < DETECT_STALL_VISIBLE_MILLIS) {
+            logger.debug { "Bilibili 检测仍在执行，本轮已标记为补跑：已运行=${elapsedMillis}ms" }
+            return
+        }
+        if (now - lastDetectStallWarnAtMillis < DETECT_STALL_WARN_INTERVAL_MILLIS) return
+        lastDetectStallWarnAtMillis = now
+        logger.warn {
+            "Bilibili 检测已连续运行 ${elapsedMillis / 1000} 秒仍未结束，本轮跳过；" +
+                "若持续过久，动态将停止推送。"
+        }
+        if (detectStallNotified) return
+        detectStallNotified = true
+        publishNotification(
+            SystemNotificationPublishRequest(
+                type = "bilibili.detect_stalled",
+                severity = SystemNotificationSeverity.ERROR,
+                title = "Bilibili 检测疑似卡住",
+                content = "Bilibili 检测已连续运行超过 ${DETECT_STALL_VISIBLE_MILLIS / 60_000} 分钟仍未结束，动态推送可能已停止。",
+                dedupeKey = "bilibili.detect_stalled:$pluginId",
+                details = mapOf("elapsedMillis" to elapsedMillis.toString()),
+            ),
+        )
     }
 
     private suspend fun <T> runBilibiliRequest(
@@ -535,9 +658,11 @@ internal class BilibiliPublisherRuntime() :
         return requestFailureHandler.run(operation, confirmsLogin, block)
     }
 
-    private suspend fun detectAndPublishLocked(skipLiveDetection: Boolean) {
+    private suspend fun detectAndPublishLocked(
+        skipLiveDetection: Boolean,
+        startupLiveWarmupAttempted: Boolean,
+    ) {
         loadActivePublishers(logSummary = false)
-        val startupLiveWarmupAttempted = runStartupBootstrapIfPending()
         val dynamicPublisherSnapshot = dynamicPublishers
         val livePublisherSnapshot = livePublishers
         if (dynamicPublisherSnapshot.isEmpty() && livePublisherSnapshot.isEmpty()) {
@@ -1396,6 +1521,21 @@ internal class BilibiliPublisherRuntime() :
         private const val BILIBILI_HOME: String = "https://www.bilibili.com"
         private const val BILIBILI_LIVE_HOME: String = "https://live.bilibili.com"
         private const val DAILY_MAINTENANCE_CRON: String = "20 4 * * *"
+
+        /** 单轮检测的兜底上限。正常一轮只需数十秒，超过说明有请求或绘图挂住了。 */
+        private const val DETECT_ROUND_TIMEOUT_MILLIS: Long = 10 * 60 * 1000L
+
+        /** 启动补发/预热的独立预算：补发量大时允许更久，但必须有上限。 */
+        private const val DETECT_BOOTSTRAP_TIMEOUT_MILLIS: Long = 30 * 60 * 1000L
+
+        /** 启动补发连续超时次数上限，超过后放弃本次补发，避免每轮都耗在补发上。 */
+        private const val MAX_STARTUP_BOOTSTRAP_TIMEOUTS: Int = 3
+
+        /** 上一轮运行超过该时长仍未结束，就不再只打 DEBUG，改为 WARN 可见。 */
+        private const val DETECT_STALL_VISIBLE_MILLIS: Long = 5 * 60 * 1000L
+
+        /** 卡住告警的重复抑制间隔，避免每个轮询周期刷一条日志。 */
+        private const val DETECT_STALL_WARN_INTERVAL_MILLIS: Long = 5 * 60 * 1000L
         private val BILIBILI_SPACE_URL_PATTERN: Regex = Regex(
             """(?:https?://)?space\.bilibili\.com/(\d+)(?:[/?#].*)?""",
             RegexOption.IGNORE_CASE,
