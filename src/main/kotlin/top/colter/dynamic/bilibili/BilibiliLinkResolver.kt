@@ -130,6 +130,7 @@ internal class BilibiliLinkResolver(
                     snapshot.share.toDisplayMetric("share"),
                 ),
                 durationSeconds = snapshot.durationSeconds,
+                publishedAtEpochSeconds = snapshot.publishedAtEpochSeconds,
             ),
         )
     }
