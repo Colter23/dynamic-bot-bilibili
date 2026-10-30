@@ -411,11 +411,15 @@ internal class BilibiliPollService(
         require(aid != null || !bvid.isNullOrBlank()) { "不支持的 Bilibili 视频 ID：$normalized" }
 
         val directory = request.directory
-        val fileName = normalized.toVideoCacheFileName()
+        // 缓存按清晰度分桶：否则用户把 videoDownload.quality 调高后仍会命中旧的低清晰度文件，
+        // 直到缓存按 idle 过期（默认为 7 天）才生效。
+        val fileName = "${normalized.toVideoCacheFileName()}-${request.quality.name.lowercase()}"
         val cachedFile = directory.resolve("$fileName.mp4")
         if (cachedFile.isFile) {
             val cachedSize = cachedFile.length()
             if (request.maxBytes <= 0 || cachedSize <= request.maxBytes) {
+                // 注意：缓存命中不回填 title/duration（避免为此多打一次详情接口），
+                // 只会影响 {video} 的 altText；正文与模板里的 {title}/{duration} 取的是 preview 的字段。
                 return LinkVideoDownloadResult(
                     video = MediaRef(cachedFile.absolutePath, MediaKind.VIDEO, mimeType = "video/mp4"),
                     fileSizeBytes = cachedSize,
@@ -468,10 +472,23 @@ internal class BilibiliPollService(
             throw e
         } catch (e: Throwable) {
             cleanupVideoCacheFiles(directory, fileName)
-            throw e
+            throw e.toUserFacingDownloadError()
         } finally {
             applyRequestDelay()
         }
+    }
+
+    /**
+     * ffmpeg 缺失或合并失败时，bilibili-client 抛出的英文异常会原样进入用户提示，
+     * 这里归一化成可操作的中文说明；其它异常保持原样。
+     */
+    private fun Throwable.toUserFacingDownloadError(): Throwable {
+        val message = message ?: return this
+        if (!message.contains("ffmpeg", ignoreCase = true)) return this
+        return IllegalStateException(
+            "需要 ffmpeg 合并音视频，请在「链接解析 → 视频下载」中配置 ffmpegPath，或把 ffmpeg 放到项目目录",
+            this,
+        )
     }
 
     override suspend fun fetchLiveRoomSnapshot(roomId: String): BilibiliLiveRoomSnapshot? {
