@@ -7,7 +7,7 @@ plugins {
 apply(from = "gradle/dynamic-plugin-fatjar.gradle.kts")
 
 group = "top.colter.dynamic"
-version = "0.0.7"
+version = "0.0.8"
 
 repositories {
     mavenLocal()
