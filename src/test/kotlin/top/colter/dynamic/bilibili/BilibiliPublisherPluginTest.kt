@@ -898,6 +898,57 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `补发分页超时后跳过常规轮询并在下轮继续历史补发`() = runBlocking {
+        val now = System.currentTimeMillis() / 1000
+        val scheduler = testScheduler(autoRun = false) as TestTaskScheduler
+        val cursors = InMemoryCursorStore()
+        var blockHistory = true
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            beforeDynamicPage = { page ->
+                if (page == 2 && blockHistory) kotlinx.coroutines.awaitCancellation()
+            },
+        )
+        val plugin = testPlugin(
+            gateway = gateway,
+            config = testConfig(replayWindowMinutes = 120, liveDetectionEnabled = false),
+            taskScheduler = scheduler,
+            cursorStore = cursors,
+            startupBootstrapTimeoutMillis = 250L,
+        )
+        val seeded = seedPublisherAndSubscriber()
+        val initialCursor = SourceCursor(
+            publisherId = seeded.publisher.id,
+            sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
+            eventType = SourceEventType.DYNAMIC_CREATED,
+            lastSeenUpdateKey = dynamicIdFor(now - 5_000L, 99),
+            lastSeenAtEpochSeconds = now - 5_000L,
+            recentUpdateKeys = emptyList(),
+        )
+        cursors.put(seeded.publisher.id, initialCursor)
+        val latest = buildDynamic(now - 3_600L, seeded.publisher.externalId.toLong(), "发布者", 1)
+        val older = buildDynamic(now - 3_900L, seeded.publisher.externalId.toLong(), "发布者", 2)
+        gateway.setDynamicPages(mapOf(1 to dynamicPage(true, latest), 2 to dynamicPage(false, older)))
+
+        plugin.init()
+        try {
+            plugin.start()
+            scheduler.runNow("bilibili-detect")
+            assertEquals(listOf(1, 2), gateway.requestedPages, "超时后不能再次请求首页并推进游标")
+            assertEquals(initialCursor, cursors.get(seeded.publisher.id))
+
+            blockHistory = false
+            scheduler.runNow("bilibili-detect")
+            assertEquals(listOf(older.id.toString(), latest.id.toString()), cursors.markedDynamicIds(seeded.publisher.id))
+            assertEquals(listOf(1, 2, 1, 2, 1), gateway.requestedPages)
+        } finally {
+            plugin.stop()
+        }
+    }
+
+    @Test
     fun `polling should stop publisher batch when source update publish fails`() = runBlocking {
         val scheduler = testScheduler()
         val cursorStore = InMemoryCursorStore()
@@ -927,11 +978,7 @@ class BilibiliPublisherPluginTest {
 
         plugin.init(sourceUpdates)
         plugin.start()
-        withTimeout(3_000) {
-            while ((scheduler.snapshot("bilibili-detect")?.runCount ?: 0L) == 0L) {
-                delay(10)
-            }
-        }
+        waitForTaskRun(scheduler)
 
         val seeded = seedPublisherAndSubscriber()
         val subscription = seeded.subscription
@@ -990,11 +1037,7 @@ class BilibiliPublisherPluginTest {
 
         plugin.init(sourceUpdates)
         plugin.start()
-        withTimeout(3_000) {
-            while ((scheduler.snapshot("bilibili-detect")?.runCount ?: 0L) == 0L) {
-                delay(10)
-            }
-        }
+        waitForTaskRun(scheduler)
 
         val seeded = seedPublisherAndSubscriber()
         val subscription = seeded.subscription
@@ -2098,6 +2141,7 @@ class BilibiliPublisherPluginTest {
         taskScheduler: TaskScheduler = testScheduler(),
         cursorStore: BilibiliCursorStore = InMemoryCursorStore(),
         liveStatusStore: BilibiliLiveStatusStore = InMemoryLiveStatusStore(),
+        startupBootstrapTimeoutMillis: Long = 30 * 60 * 1000L,
     ): BilibiliPublisherPlugin {
         TestSubscriptions.reset()
         TestSourceStateStore.reset()
@@ -2108,6 +2152,7 @@ class BilibiliPublisherPluginTest {
             liveStatusStoreFactory = { liveStatusStore },
             saveConfig = saveConfig,
             taskScheduler = taskScheduler,
+            startupBootstrapTimeoutMillis = startupBootstrapTimeoutMillis,
         )
     }
 
@@ -2273,6 +2318,7 @@ class BilibiliPublisherPluginTest {
         private val liveBatchFailure: Throwable? = null,
         private val liveBatchStarted: CompletableDeferred<Unit>? = null,
         private val liveBatchContinue: CompletableDeferred<Unit>? = null,
+        private val beforeDynamicPage: suspend (Int) -> Unit = {},
     ) : BilibiliPlatformGateway {
         private val groups: MutableList<BiliGroup> = initialGroups.toMutableList()
         private val dynamicPages: MutableMap<Int, BiliDynamicList> = initialDynamicPages.toMutableMap()
@@ -2312,6 +2358,7 @@ class BilibiliPublisherPluginTest {
 
         override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
             requestedPages.add(page)
+            beforeDynamicPage(page)
             if (page in dynamicPageFailures) {
                 throw dynamicPageFailure ?: IllegalStateException("dynamic page failed: $page")
             }

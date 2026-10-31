@@ -1,5 +1,6 @@
 package top.colter.dynamic.bilibili
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -164,6 +165,7 @@ internal class BilibiliPublisherRuntime() :
 
     /** 启动补发连续超时次数，用于避免每轮都把时间耗在注定跑不完的补发上。 */
     private var startupBootstrapTimeouts: Int = 0
+    private var startupBootstrapTimeoutMillis: Long = DETECT_BOOTSTRAP_TIMEOUT_MILLIS
 
     internal constructor(
         loadConfig: (String) -> BilibiliPublisherConfig,
@@ -172,6 +174,7 @@ internal class BilibiliPublisherRuntime() :
         liveStatusStoreFactory: () -> BilibiliLiveStatusStore,
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
         taskScheduler: TaskScheduler,
+        startupBootstrapTimeoutMillis: Long = DETECT_BOOTSTRAP_TIMEOUT_MILLIS,
     ) : this() {
         this.loadConfig = loadConfig
         this.useContextConfigService = false
@@ -182,6 +185,7 @@ internal class BilibiliPublisherRuntime() :
         this.taskScheduler = taskScheduler
         this.useContextTaskScheduler = false
         this.useContextStateStores = false
+        this.startupBootstrapTimeoutMillis = startupBootstrapTimeoutMillis
     }
 
     override val supportedLoginMethods: Set<PublisherLoginMethod> = setOf(
@@ -533,7 +537,7 @@ internal class BilibiliPublisherRuntime() :
         try {
             // 启动引导（补发/预热）单独计时：它可能很长但必须能跑完，
             // 用轮询超时去卡它会把补发截断，而且计划已被取走、无法重试。
-            val startupLiveWarmupAttempted = runStartupBootstrapPhase()
+            val startupLiveWarmupAttempted = runStartupBootstrapPhase() ?: return
 
             // 单轮超时是兜底：正常检测应在数十秒内结束。一旦某个请求或绘图挂住，
             // 必须让锁释放并留下 ERROR 日志，而不是让后续每轮都只打 DEBUG 静默跳过。
@@ -575,8 +579,8 @@ internal class BilibiliPublisherRuntime() :
      * 补发量大时单轮可能远超轮询超时，所以给它更宽的预算；万一真的卡住，
      * 重新排队让下一轮继续，而不是把剩余补发直接丢掉。
      */
-    private suspend fun runStartupBootstrapPhase(): Boolean {
-        val completed = withTimeoutOrNull(DETECT_BOOTSTRAP_TIMEOUT_MILLIS) {
+    private suspend fun runStartupBootstrapPhase(): Boolean? {
+        val completed = withTimeoutOrNull(startupBootstrapTimeoutMillis) {
             runStartupBootstrapIfPending()
         }
         if (completed != null) {
@@ -589,7 +593,7 @@ internal class BilibiliPublisherRuntime() :
         if (canRetry) {
             requeueReplayAfterBootstrapTimeout()
             logger.warn {
-                "Bilibili 启动补发/预热超过 ${DETECT_BOOTSTRAP_TIMEOUT_MILLIS / 60_000} 分钟未完成，本轮中止；" +
+                "Bilibili 启动补发/预热超过 ${startupBootstrapTimeoutMillis / 60_000} 分钟未完成，本轮中止；" +
                     "已重新排队，下一轮继续（连续超时=${startupBootstrapTimeouts}/$MAX_STARTUP_BOOTSTRAP_TIMEOUTS）。"
             }
         } else {
@@ -607,7 +611,8 @@ internal class BilibiliPublisherRuntime() :
                 ),
             )
         }
-        return false
+        // 待重试时不能执行常规轮询，否则首页会把游标推进到尚未补完的历史之后。
+        return if (canRetry) null else false
     }
 
     private fun requeueReplayAfterBootstrapTimeout() {
@@ -784,6 +789,7 @@ internal class BilibiliPublisherRuntime() :
         if (plan.initializeFollowGroup) {
             runCatching { followService.ensureFollowGroupInitialized() }
                 .onFailure {
+                    if (it is CancellationException) throw it
                     logger.warn(it) {
                         "Bilibili 关注分组初始化失败"
                     }
@@ -792,6 +798,7 @@ internal class BilibiliPublisherRuntime() :
         if (plan.replayMissingDynamics) {
             runCatching { replayMissingDynamics() }
                 .onFailure {
+                    if (it is CancellationException) throw it
                     logger.warn {
                         "Bilibili 历史动态补发未完成：${it.message ?: "未知错误"}"
                     }
@@ -802,6 +809,7 @@ internal class BilibiliPublisherRuntime() :
         } else if (plan.warmUpExistingCursors) {
             runCatching { warmUpExistingCursors() }
                 .onFailure {
+                    if (it is CancellationException) throw it
                     logger.warn(it) {
                         "Bilibili 动态游标预热失败"
                     }
@@ -810,6 +818,7 @@ internal class BilibiliPublisherRuntime() :
         if (plan.warmUpLiveStatuses) {
             runCatching { warmUpLiveStatuses() }
                 .onFailure {
+                    if (it is CancellationException) throw it
                     logger.warn(it) {
                         "Bilibili 直播状态预热失败"
                     }

@@ -50,6 +50,7 @@ public class BilibiliPublisherPlugin private constructor(
         liveStatusStoreFactory: () -> BilibiliLiveStatusStore,
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
         taskScheduler: TaskScheduler,
+        startupBootstrapTimeoutMillis: Long = 30 * 60 * 1000L,
     ) : this(
         BilibiliPublisherRuntime(
             loadConfig = loadConfig,
@@ -58,6 +59,7 @@ public class BilibiliPublisherPlugin private constructor(
             liveStatusStoreFactory = liveStatusStoreFactory,
             saveConfig = saveConfig,
             taskScheduler = taskScheduler,
+            startupBootstrapTimeoutMillis = startupBootstrapTimeoutMillis,
         )
     )
 
