@@ -239,16 +239,26 @@ internal class BilibiliLinkResolver(
                 ?.takeIf { it.all(Char::isDigit) }
                 ?.let { dynamicParsedLink(it, inputUrl) }
             "www.bilibili.com",
-            "m.bilibili.com" -> when (pathSegments.firstOrNull()) {
-                "opus",
-                "dynamic" -> pathSegments.getOrNull(1)
-                    ?.takeIf { it.all(Char::isDigit) }
-                    ?.let { dynamicParsedLink(it, inputUrl) }
-                "video" -> pathSegments.getOrNull(1)
-                    ?.takeIf { it.isBilibiliVideoId() }
-                    ?.let { videoParsedLink(it, inputUrl) }
-                "read" -> null
-                else -> null
+            "m.bilibili.com" -> {
+                val contentPath = if (
+                    pathSegments.getOrNull(1) == "video" &&
+                    pathSegments.first().matches(VIDEO_LOCALE_PATTERN)
+                ) {
+                    pathSegments.drop(1)
+                } else {
+                    pathSegments
+                }
+                when (contentPath.firstOrNull()) {
+                    "opus",
+                    "dynamic" -> contentPath.getOrNull(1)
+                        ?.takeIf { it.all(Char::isDigit) }
+                        ?.let { dynamicParsedLink(it, inputUrl) }
+                    "video" -> contentPath.getOrNull(1)
+                        ?.takeIf { it.isBilibiliVideoId() }
+                        ?.let { videoParsedLink(it, inputUrl) }
+                    "read" -> null
+                    else -> null
+                }
             }
             "live.bilibili.com" -> pathSegments.firstOrNull()
                 ?.takeIf { it.all(Char::isDigit) }
@@ -440,6 +450,7 @@ internal class BilibiliLinkResolver(
     }
 
     private companion object {
+        private val VIDEO_LOCALE_PATTERN = Regex("[a-z]{2}(?:-[a-z]{2,8})*", RegexOption.IGNORE_CASE)
         private const val BILIBILI_DYNAMIC_HOME: String = "https://t.bilibili.com"
         private const val BILIBILI_HOME: String = "https://www.bilibili.com"
         private const val BILIBILI_LIVE_HOME: String = "https://live.bilibili.com"

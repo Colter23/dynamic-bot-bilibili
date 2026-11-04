@@ -460,6 +460,30 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `parseLink should normalize localized Bilibili video links without requests`() = runBlocking {
+        val gateway = defaultGateway()
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        for (host in listOf("www.bilibili.com", "m.bilibili.com")) {
+            for (locale in listOf("zh-Hans", "zh-Hant", "en")) {
+                for (videoId in listOf("BV18mnm6MEqD", "av170001")) {
+                    val url = "https://$host/$locale/video/$videoId/?p=2&share_source=copy_link#reply"
+
+                    assertTrue(plugin.matchesLink(url), url)
+                    val parsed = requireNotNull(plugin.parseLink(url))
+                    assertEquals(LinkKinds.VIDEO, parsed.kind)
+                    assertEquals(videoId, parsed.targetId)
+                    assertEquals("https://www.bilibili.com/video/$videoId", parsed.normalizedUrl)
+                    assertEquals(url, parsed.sourceUrl)
+                }
+            }
+        }
+        assertTrue(gateway.expandedShortUrls.isEmpty())
+        assertTrue(gateway.requestedVideos.isEmpty())
+    }
+
+    @Test
     fun `parseLink should expand Bilibili short links`() = runBlocking {
         val shortUrl = "https://b23.tv/demo"
         val gateway = defaultGateway(
@@ -479,12 +503,48 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `parseLink should expand short links to localized Bilibili videos`() = runBlocking {
+        val shortUrl = "https://b23.tv/localized"
+        val gateway = defaultGateway(
+            shortUrlExpansions = mapOf(shortUrl to "https://www.bilibili.com/zh-Hans/video/BV18mnm6MEqD"),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val parsed = requireNotNull(plugin.parseLink(shortUrl))
+
+        assertEquals(LinkKinds.VIDEO, parsed.kind)
+        assertEquals("BV18mnm6MEqD", parsed.targetId)
+        assertEquals("https://www.bilibili.com/video/BV18mnm6MEqD", parsed.normalizedUrl)
+        assertEquals(shortUrl, parsed.sourceUrl)
+        assertEquals(listOf(shortUrl), gateway.expandedShortUrls)
+    }
+
+    @Test
     fun `parseLink should ignore unsupported links`() = runBlocking {
         val plugin = testPlugin(defaultGateway())
         plugin.init()
 
         assertNull(plugin.parseLink("https://www.bilibili.com/read/cv123"))
         assertNull(plugin.parseLink("https://example.com/opus/774783779415785528"))
+    }
+
+    @Test
+    fun `parseLink should reject unrelated paths and hosts with localized video paths`() = runBlocking {
+        val plugin = testPlugin(defaultGateway())
+        plugin.init()
+
+        for (url in listOf(
+            "https://example.com/zh-Hans/video/BV18mnm6MEqD",
+            "https://www.bilibili.com.example.com/zh-Hans/video/BV18mnm6MEqD",
+            "https://www.bilibili.com/other/video/BV18mnm6MEqD",
+            "https://www.bilibili.com/zh-Hans/other/video/BV18mnm6MEqD",
+            "https://www.bilibili.com/zh-Hans/video/",
+            "https://www.bilibili.com/zh-Hans/video/not-a-video-id",
+        )) {
+            assertFalse(plugin.matchesLink(url), url)
+            assertNull(plugin.parseLink(url), url)
+        }
     }
 
     @Test
@@ -551,6 +611,34 @@ class BilibiliPublisherPluginTest {
         assertEquals(listOf("play", "danmaku", "like", "coin", "favorite", "comment", "share"), resolution.preview.metrics.map { it.key })
         assertEquals(listOf("BV1xx411c7mD"), gateway.requestedVideos)
         assertEquals(emptyList(), gateway.requestedPublisherSnapshots)
+    }
+
+    @Test
+    fun `resolveLink should fetch localized video by normalized id`() = runBlocking {
+        val videoId = "BV18mnm6MEqD"
+        val gateway = defaultGateway(
+            videoSnapshots = mapOf(
+                videoId to BilibiliVideoSnapshot(
+                    aid = 170001,
+                    bvid = videoId,
+                    title = "localized video",
+                    description = "video description",
+                    ownerId = "42",
+                    ownerName = "demo-up",
+                ),
+            ),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+
+        val parsed = requireNotNull(plugin.parseLink("https://www.bilibili.com/zh-Hans/video/$videoId"))
+        val resolution = assertIs<LinkResolution.Preview>(plugin.resolveLink(parsed))
+
+        assertEquals(videoId, resolution.preview.id)
+        assertEquals("localized video", resolution.preview.title)
+        assertEquals("https://www.bilibili.com/video/$videoId", resolution.preview.url)
+        assertEquals(listOf(videoId), gateway.requestedVideos)
+        assertTrue(gateway.expandedShortUrls.isEmpty())
     }
 
     @Test
