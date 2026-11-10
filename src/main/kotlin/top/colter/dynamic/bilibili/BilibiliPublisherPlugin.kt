@@ -4,6 +4,7 @@ import top.colter.dynamic.core.config.ConfigApplyResult
 import top.colter.dynamic.core.config.ConfigurablePlugin
 import top.colter.dynamic.core.data.PlatformDescriptor
 import top.colter.dynamic.core.data.PlatformId
+import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.PublisherInfo
 import top.colter.dynamic.core.event.SubscriptionChangedEvent
 import top.colter.dynamic.core.link.LinkResolution
@@ -83,6 +84,7 @@ public class BilibiliPublisherPlugin private constructor(
         get() = runtime.supportsCookieExport
 
     override suspend fun onLoad(context: PluginContext) {
+        requireDrawingPreviewSupport()
         runtime.onLoad(context)
     }
 
@@ -108,6 +110,10 @@ public class BilibiliPublisherPlugin private constructor(
 
     override suspend fun fetchPublisherInfo(userId: String): PublisherInfo? {
         return runtime.fetchPublisherInfo(userId)
+    }
+
+    override fun preparePublisherForDrawing(publisher: PublisherInfo): PublisherInfo {
+        return runtime.preparePublisherForDrawing(publisher)
     }
 
     override suspend fun fetchLatestPublisherUpdate(
@@ -181,5 +187,17 @@ public class BilibiliPublisherPlugin private constructor(
 
     override suspend fun downloadVideoLink(request: LinkVideoDownloadRequest): LinkVideoDownloadResult {
         return runtime.downloadVideoLink(request)
+    }
+}
+
+internal fun requireDrawingPreviewSupport(
+    mediaRefClass: Class<*> = MediaRef::class.java,
+    lookupPluginClass: Class<*> = PublisherLookupPlugin::class.java,
+) {
+    check(
+        runCatching { mediaRefClass.getMethod("getPreviewUri") }.isSuccess &&
+            runCatching { lookupPluginClass.getMethod("preparePublisherForDrawing", PublisherInfo::class.java) }.isSuccess,
+    ) {
+        "当前主程序不支持绘图预览，请更新到包含 dynamic-bot-core 0.0.7 或更高兼容版本的主程序后再加载 Bilibili 插件。"
     }
 }

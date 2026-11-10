@@ -35,13 +35,21 @@ class BilibiliPublisherConfigFormTest {
             sections.getValue("轮询与风控").map { it.path },
         )
         assertEquals(
-            listOf("liveDetectionEnabled", "liveStatusBatchSize", "replayWindowMinutes"),
+            listOf("liveDetectionEnabled", "drawImageMode", "liveStatusBatchSize", "replayWindowMinutes"),
             sections.getValue("动态与直播").map { it.path },
         )
         assertEquals(
             listOf("followGroupName", "shortUrlResolveTimeoutSeconds"),
             sections.getValue("关注与链接").map { it.path },
         )
+    }
+
+    @Test
+    fun `image mode should default to original and expose two choices without restart`() {
+        val field = BilibiliPublisherConfigForm.spec.fields.single { it.path == "drawImageMode" }
+        assertEquals(BilibiliDrawImageMode.ORIGINAL, BilibiliPublisherConfig().drawImageMode)
+        assertEquals(listOf("ORIGINAL", "COMPRESSED"), field.options.map { it.value })
+        assertFalse(field.restartRequired)
     }
 
     @Test

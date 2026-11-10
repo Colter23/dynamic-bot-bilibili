@@ -16,7 +16,7 @@ repositories {
 
 dependencies {
     val coroutinesVersion = "1.11.0"
-    val coreVersion = "0.0.6"
+    val coreVersion = "0.0.7"
     val kotlinLoggingVersion = "8.0.4"
 
     implementation("top.colter.bilibili:bilibili-client:0.0.3")

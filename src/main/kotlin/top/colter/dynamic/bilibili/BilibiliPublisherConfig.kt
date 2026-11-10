@@ -1,6 +1,7 @@
 package top.colter.dynamic.bilibili
 
 import top.colter.dynamic.core.config.ConfigFieldSpec
+import top.colter.dynamic.core.config.ConfigFieldOption
 import top.colter.dynamic.core.config.ConfigFieldType
 import top.colter.dynamic.core.config.ConfigFormSpec
 import top.colter.dynamic.core.config.ConfigNumberKind
@@ -16,6 +17,7 @@ public data class BilibiliPublisherConfig(
     val maxConsecutiveLoginFailures: Int = 3,
     val requestBlockCooldownMinutes: Int = 30,
     val cookiesJson: String = "",
+    val drawImageMode: BilibiliDrawImageMode = BilibiliDrawImageMode.ORIGINAL,
 )
 
 public object BilibiliPublisherConfigForm {
@@ -49,6 +51,17 @@ public object BilibiliPublisherConfigForm {
                 type = ConfigFieldType.BOOLEAN,
                 section = "动态与直播",
                 description = "是否检测开播和下播。\n关闭后只检测动态，不再产生直播开始和直播结束事件。",
+            ),
+            ConfigFieldSpec(
+                path = "drawImageMode",
+                label = "绘图图片下载",
+                type = ConfigFieldType.SELECT,
+                section = "动态与直播",
+                description = "压缩图适合网络较慢的环境，正文图片和封面以宽度上限 1920、WebP 质量 80 下载，保持比例。\n不影响模板发送原图；表情、挂件、GIF 和已格式化的图片保持原样。高倍率绘图需要更多细节时请选择原图。",
+                options = listOf(
+                    ConfigFieldOption("ORIGINAL", "原图"),
+                    ConfigFieldOption("COMPRESSED", "压缩图"),
+                ),
             ),
             ConfigFieldSpec(
                 path = "liveStatusBatchSize",

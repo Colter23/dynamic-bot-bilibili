@@ -62,6 +62,37 @@ class BilibiliDynamicMapperTest {
     private val mapper = BilibiliDynamicMapper()
 
     @Test
+    fun `map should apply current image mode and preserve long image metadata`() {
+        var mode = BilibiliDrawImageMode.COMPRESSED
+        val mapper = BilibiliDynamicMapper { mode }
+        val uri = "https://i0.hdslb.com/bfs/new_dyn/long.jpg"
+        val source = dynamic(
+            id = "123456791",
+            type = OriginDynamicType.DRAW,
+            dynamic = ModuleDynamic(
+                major = DynamicMajor(
+                    type = MajorType.DRAW,
+                    draw = MajorDraw(
+                        id = 10,
+                        images = listOf(MajorDrawItem(width = 2000, height = 40000, size = 12.5f, src = BiliImageUrl(uri))),
+                    ),
+                ),
+            ),
+        )
+        fun image() = assertIs<DynamicPayload>(assertNotNull(mapper.map(source, fallbackPublisher())).payload)
+            .blocks.filterIsInstance<ImageGridBlock>().single().images.single()
+
+        val compressed = image()
+        assertEquals(uri, compressed.image.uri)
+        assertEquals("$uri@1920w_80q.webp", compressed.image.previewUri)
+        assertEquals(2000, compressed.width)
+        assertEquals(40000, compressed.height)
+        assertEquals("长图", compressed.badge)
+        mode = BilibiliDrawImageMode.ORIGINAL
+        assertNull(image().image.previewUri)
+    }
+
+    @Test
     fun `map should preserve rich content images and stat counts`() {
         val source = dynamic(
             id = "123456789",

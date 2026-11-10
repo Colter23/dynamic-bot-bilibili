@@ -118,7 +118,7 @@ internal class BilibiliLinkResolver(
                 title = snapshot.title,
                 description = snapshot.description,
                 badge = "视频",
-                cover = snapshot.coverUrl?.let { MediaRef(it, MediaKind.COVER) },
+                cover = snapshot.coverUrl?.let { MediaRef(it, MediaKind.COVER).withDrawImage(config.drawImageMode) },
                 publisher = snapshot.toPublisherInfo(),
                 metrics = listOfNotNull(
                     snapshot.play.toDisplayMetric("play"),
@@ -162,7 +162,7 @@ internal class BilibiliLinkResolver(
                 title = snapshot.title.ifBlank { "Bilibili 直播间 ${snapshot.roomId}" },
                 description = snapshot.area.orEmpty(),
                 badge = snapshot.status.label(),
-                cover = snapshot.coverUrl?.let { MediaRef(it, MediaKind.COVER) },
+                cover = snapshot.coverUrl?.let { MediaRef(it, MediaKind.COVER).withDrawImage(config.drawImageMode) },
                 publisher = publisher,
                 metrics = listOfNotNull(
                     snapshot.online.toDisplayMetric("online"),
@@ -220,7 +220,8 @@ internal class BilibiliLinkResolver(
                 null
             }
         if (fetched == null) return if (requireRemote) null else seed
-        return seed?.let { mergePublisherInfo(fetched.copy(key = it.key), it) } ?: fetched
+        return (seed?.let { mergePublisherInfo(fetched.copy(key = it.key), it) } ?: fetched)
+            .withDrawImages(config.drawImageMode)
     }
 
     private fun parseDirectLink(inputUrl: String): ParsedLink? {

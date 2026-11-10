@@ -212,7 +212,7 @@ internal class BilibiliPublisherRuntime() :
         }
         config = loadConfig(pluginId)
         rebuildPollService()
-        mapper = BilibiliDynamicMapper()
+        mapper = BilibiliDynamicMapper { config.drawImageMode }
         requestFailureHandler = BilibiliRequestFailureHandler(
             configProvider = { config },
             notificationPublisher = notificationPublisher,
@@ -346,6 +346,10 @@ internal class BilibiliPublisherRuntime() :
             pollService.fetchPublisherSnapshot(userId)
         }.getOrNull() ?: return null
         return snapshot.toPublisherInfo()
+    }
+
+    override fun preparePublisherForDrawing(publisher: PublisherInfo): PublisherInfo {
+        return publisher.withDrawImages(currentConfig().drawImageMode)
     }
 
     override suspend fun fetchPublisherInfos(userIds: Collection<String>): Map<String, PublisherInfo> {
@@ -1079,7 +1083,7 @@ internal class BilibiliPublisherRuntime() :
                 eventType = eventType,
                 externalId = "$roomId:$eventTime",
             ),
-            publisher = publisher.toInfo(),
+            publisher = publisher.toInfo().withDrawImages(config.drawImageMode),
             occurredAtEpochSeconds = eventTime,
             observedAtEpochSeconds = observedAt,
             link = liveLink(roomId),
@@ -1087,7 +1091,7 @@ internal class BilibiliPublisherRuntime() :
                 roomId = roomId,
                 title = title,
                 area = current.area ?: previous.area,
-                cover = current.cover ?: previous.cover,
+                cover = (current.cover ?: previous.cover)?.withDrawImage(config.drawImageMode),
                 status = current.status,
                 previousStatus = previous.status,
                 startedAtEpochSeconds = startedAt,

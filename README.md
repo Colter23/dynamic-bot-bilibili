@@ -23,6 +23,8 @@ Bilibili 动态源插件，用于让 dynamic-bot 订阅 Bilibili UP 主的动态
 
 把生成的 `*-all.jar` 放入主程序的 `plugins/` 目录，然后启动或重启 dynamic-bot，在后台启用插件。
 
+当前源码需要配套使用包含 `dynamic-bot-core 0.0.7` 或更高兼容版本的主程序。旧主程序会提示先升级，避免运行时发生方法缺失错误。
+
 ## 登录
 
 在后台的“平台登录”页登录 Bilibili 账号，支持二维码和 Cookie 两种方式，推荐用二维码。
@@ -36,6 +38,7 @@ Bilibili 动态源插件，用于让 dynamic-bot 订阅 Bilibili UP 主的动态
 - `轮询间隔`：多久检查一次动态和直播状态，默认 30 秒。
 - `接口请求间隔`：连续请求 Bilibili 接口之间等待多久，默认 0.5 秒。
 - `直播检测`：是否推送开播和下播。
+- `绘图图片下载`：默认原图；弱网可选压缩图，由 B 站 CDN 等比缩放到宽度上限 1920 并以 WebP 质量 80 返回，减少绘图下载流量。保存后用于后续生成的动态和链接预览，不影响模板发送原图；表情、挂件、GIF 和已格式化的地址保持原样。高倍率绘图重视细节时建议使用原图。
 - `关注分组名称`：自动关注时加入哪个 Bilibili 关注分组。
 - `补发时间窗口`：启动时是否补发最近动态，默认 0（不补发）。
 - `风控暂停时长`：检测到请求被拦截后暂停多久。
@@ -67,3 +70,5 @@ Bilibili 动态源插件，用于让 dynamic-bot 订阅 Bilibili UP 主的动态
 .\gradlew.bat test
 .\gradlew.bat fatJar --offline
 ```
+
+验证独立构建可使用 `-PuseLocalCore=false`，此时直接解析 Maven 中声明的 core 版本。core 的新版本需要先发布到 Maven 仓库；本地验证可先在 core 项目运行 `publishToMavenLocal`。

@@ -73,6 +73,7 @@ import top.colter.dynamic.core.plugin.SourceStateStore
 import top.colter.dynamic.core.plugin.SubscriptionQueryService
 import top.colter.dynamic.core.plugin.PublisherLatestUpdateRequest
 import top.colter.dynamic.core.plugin.PublisherLatestUpdateResult
+import top.colter.dynamic.core.plugin.PublisherLookupPlugin
 import top.colter.dynamic.core.task.TaskDefinition
 import top.colter.dynamic.core.task.TaskSchedule
 import top.colter.dynamic.core.task.TaskScheduler
@@ -85,6 +86,7 @@ import kotlin.reflect.KClass
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -567,6 +569,75 @@ class BilibiliPublisherPluginTest {
         assertEquals("42", resolution.update.publisher.externalId)
         assertEquals("demo-up", resolution.update.publisher.name)
         assertEquals(listOf(detail.id.toString()), gateway.requestedDetails)
+    }
+
+    @Test
+    fun `link covers should follow image mode changes without changing original urls`() = runBlocking {
+        val uri = "https://i0.hdslb.com/bfs/archive/cover.jpg"
+        val gateway = defaultGateway(
+            snapshot = BilibiliPublisherSnapshot(userId = "42", name = "demo", faceUrl = "", headerUrl = uri),
+            videoSnapshots = mapOf("BV1xx411c7mD" to BilibiliVideoSnapshot(
+                aid = 170001, bvid = "BV1xx411c7mD", title = "video", description = "", coverUrl = uri,
+                ownerId = "42", ownerName = "demo",
+            )),
+            liveRoomSnapshots = mapOf("12345" to BilibiliLiveRoomSnapshot(
+                userId = "42", roomId = "12345", status = LiveStatus.OPEN, title = "live", coverUrl = uri,
+            )),
+        )
+        val plugin = testPlugin(gateway)
+        plugin.init()
+        val urls = listOf(
+            "https://www.bilibili.com/video/BV1xx411c7mD",
+            "https://live.bilibili.com/12345",
+            "https://space.bilibili.com/42",
+        )
+        for (mode in listOf(BilibiliDrawImageMode.COMPRESSED, BilibiliDrawImageMode.ORIGINAL)) {
+            assertFalse(plugin.applyConfig(plugin.currentConfig().copy(drawImageMode = mode)).restartRequired)
+            for (url in urls) {
+                val parsed = requireNotNull(plugin.parseLink(url))
+                val preview = assertIs<LinkResolution.Preview>(plugin.resolveLink(parsed)).preview
+                assertEquals(uri, preview.cover?.uri)
+                assertEquals(if (mode == BilibiliDrawImageMode.COMPRESSED) "$uri@1920w_80q.webp" else null, preview.cover?.previewUri)
+            }
+        }
+    }
+
+    @Test
+    fun `drawing preparation should apply current mode without fetching publisher`() = runBlocking {
+        val gateway = defaultGateway()
+        val plugin = testPlugin(gateway)
+        plugin.init()
+        val uri = "https://i0.hdslb.com/bfs/space/banner.jpg"
+        val publisher = PublisherInfo(
+            key = PublisherKey.of(platformId = "bilibili", externalId = "42"),
+            name = "demo",
+            avatar = MediaRef("https://example.com/face.png", MediaKind.AVATAR),
+            banner = MediaRef(uri, MediaKind.COVER),
+        )
+
+        plugin.applyConfig(plugin.currentConfig().copy(drawImageMode = BilibiliDrawImageMode.COMPRESSED))
+        val compressed = plugin.preparePublisherForDrawing(publisher)
+        assertEquals(uri, compressed.banner?.uri)
+        assertEquals("$uri@1920w_80q.webp", compressed.banner?.previewUri)
+
+        plugin.applyConfig(plugin.currentConfig().copy(drawImageMode = BilibiliDrawImageMode.ORIGINAL))
+        assertEquals(publisher, plugin.preparePublisherForDrawing(compressed))
+        assertEquals(emptyList(), gateway.requestedPublisherSnapshots)
+    }
+
+    @Test
+    fun `old hosts should receive a clear core upgrade error`() {
+        requireDrawingPreviewSupport()
+
+        for ((mediaClass, lookupClass) in listOf(
+            Any::class.java to PublisherLookupPlugin::class.java,
+            MediaRef::class.java to Any::class.java,
+        )) {
+            val error = assertFailsWith<IllegalStateException> {
+                requireDrawingPreviewSupport(mediaClass, lookupClass)
+            }
+            assertTrue(error.message.orEmpty().contains("dynamic-bot-core 0.0.7"))
+        }
     }
 
     @Test
@@ -1791,7 +1862,7 @@ class BilibiliPublisherPluginTest {
         val liveStore = InMemoryLiveStatusStore()
         val plugin = testPlugin(
             gateway,
-            config = testConfig(pollingIntervalSeconds = 0.025),
+            config = testConfig(pollingIntervalSeconds = 0.025).copy(drawImageMode = BilibiliDrawImageMode.COMPRESSED),
             liveStatusStore = liveStore,
             taskScheduler = scheduler,
         )
@@ -1805,12 +1876,16 @@ class BilibiliPublisherPluginTest {
         assertNull(withTimeoutOrNull(100) { sourceUpdates.receive() })
 
         val startedAt = System.currentTimeMillis() / 1000
-        gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.OPEN, startedAt)))
+        val coverUri = "https://i0.hdslb.com/bfs/live/cover.jpg"
+        gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.OPEN, startedAt).copy(coverUrl = coverUri)))
         val startedUpdate = withTimeout(3_000) { sourceUpdates.receive() }.update
         val started = assertIs<LivePayload>(startedUpdate.payload)
         assertEquals(SourceEventType.LIVE_STARTED, startedUpdate.eventType)
         assertEquals("456", started.roomId)
         assertEquals(startedAt, started.startedAtEpochSeconds)
+        assertEquals(coverUri, started.cover?.uri)
+        assertEquals("$coverUri@1920w_80q.webp", started.cover?.previewUri)
+        assertNull(liveStore.get(1)?.cover?.previewUri)
 
         gateway.setLiveSnapshots(mapOf(123L to liveSnapshot(LiveStatus.ROUND)))
         val endedUpdate = withTimeout(3_000) { sourceUpdates.receive() }.update

@@ -66,7 +66,9 @@ import top.colter.dynamic.core.data.TextBlock
 import top.colter.dynamic.core.data.UpdateKey
 import top.colter.dynamic.core.plugin.PlatformDrawAssetKeys
 
-internal class BilibiliDynamicMapper {
+internal class BilibiliDynamicMapper(
+    private val imageModeProvider: () -> BilibiliDrawImageMode = { BilibiliDrawImageMode.ORIGINAL },
+) {
     fun map(source: BiliDynamic, fallbackPublisher: Publisher): SourceUpdate? {
         return map(source, fallbackPublisher, depth = 0)
     }
@@ -109,7 +111,7 @@ internal class BilibiliDynamicMapper {
                 ?: if (author.official == null) fallbackPublisher.avatarBadgeKey else null,
             avatar = author.face.toCoreImageOrNull(MediaKind.AVATAR) ?: fallbackPublisher.avatar,
             pendant = author.pendant?.image?.toCoreImageOrNull(MediaKind.AVATAR) ?: fallbackPublisher.pendant,
-        )
+        ).withDrawImages(imageModeProvider())
     }
 
     private fun buildLabels(source: BiliDynamic): List<DynamicLabel> {
@@ -666,7 +668,9 @@ internal class BilibiliDynamicMapper {
     }
 
     private fun BiliImageUrl.toCoreImageOrNull(kind: MediaKind = MediaKind.IMAGE): MediaRef? {
-        return url.toNormalizedUrlOrNull()?.let { MediaRef(uri = it, kind = kind) }
+        return url.toNormalizedUrlOrNull()?.let {
+            MediaRef(uri = it, kind = kind).withDrawImage(imageModeProvider())
+        }
     }
 
     private fun MediaRef.inferImageBadge(width: Int?, height: Int?): String? {
