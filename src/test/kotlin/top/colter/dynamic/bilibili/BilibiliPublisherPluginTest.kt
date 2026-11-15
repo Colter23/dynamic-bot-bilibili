@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -1692,6 +1693,38 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `failed credential save retries and does not report early success callback`() = runBlocking {
+        val scheduler = testScheduler(autoRun = false)
+        val gateway = FakeGateway(
+            snapshot = null,
+            followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            exportedCookiesJson = """[{"name":"SESSDATA","value":"new-session"}]""",
+        )
+        var attempts = 0
+        var saved: BilibiliPublisherConfig? = null
+        val plugin = testPlugin(gateway, taskScheduler = scheduler, saveConfig = { _, config ->
+            attempts += 1
+            if (attempts == 1) throw java.io.IOException("disk full")
+            saved = config
+        })
+        plugin.init()
+        try {
+            val statuses = mutableListOf<PublisherLoginStatus>()
+            val result = plugin.loginByQrCode({}, { statuses.add(it.status) })
+            assertEquals(PublisherLoginStatus.SUCCESS, result.status)
+            assertTrue(result.message.contains("暂未保存"))
+            assertFalse(PublisherLoginStatus.SUCCESS in statuses)
+            assertNull(saved)
+            plugin.checkLoginState()
+            assertEquals(2, attempts)
+            assertEquals("""[{"name":"SESSDATA","value":"new-session"}]""", saved?.cookiesJson)
+            plugin.checkLoginState()
+            assertEquals(2, attempts)
+        } finally { plugin.stop() }
+    }
+
+    @Test
     fun `loginByQrCode should persist cookies and start detection task after startup skip`() = runBlocking {
         val scheduler = testScheduler()
         val gateway = FakeGateway(
@@ -1760,7 +1793,7 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
-    fun `daily maintenance should refresh homepage and batch follow subscribed publishers`() = runBlocking {
+    fun `daily maintenance should refresh session and batch follow subscribed publishers`() = runBlocking {
         val scheduler = testScheduler(autoRun = false) as TestTaskScheduler
         val gateway = FakeGateway(
             snapshot = null,
@@ -1774,7 +1807,7 @@ class BilibiliPublisherPluginTest {
         )
         val plugin = testPlugin(
             gateway,
-            config = testConfig(),
+            config = testConfig().copy(cookiesJson = """[{"name":"SESSDATA","value":"stored"}]"""),
             taskScheduler = scheduler,
         )
         seedPublisherAndSubscriber(externalId = "101", targetId = "9001")
@@ -1789,6 +1822,162 @@ class BilibiliPublisherPluginTest {
         assertEquals(listOf(listOf("102")), gateway.followedUserBatches)
 
         plugin.stop()
+    }
+
+    @Test
+    fun `maintenance retries failed startup login and starts polling after recovery`() = runBlocking {
+        val scheduler = testScheduler(autoRun = false) as TestTaskScheduler
+        val gateway = defaultGateway().apply {
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.FAILED, "not logged in")
+        }
+        val plugin = testPlugin(gateway,
+            config = testConfig().copy(cookiesJson = """[{"name":"SESSDATA","value":"stored"}]"""),
+            taskScheduler = scheduler)
+        plugin.init()
+        try {
+            plugin.start()
+            assertFalse(scheduler.isRunning("bilibili-detect"))
+            assertTrue(scheduler.isRunning("bilibili-maintenance"))
+            gateway.loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "recovered")
+            scheduler.runNow("bilibili-maintenance")
+            assertEquals(1, gateway.refreshedHomeCount)
+            assertTrue(scheduler.isRunning("bilibili-detect"))
+        } finally { plugin.stop() }
+    }
+
+    @Test
+    fun `maintenance resumes polling paused by expired credentials`() = runBlocking {
+        val scheduler = testScheduler(autoRun = false) as TestTaskScheduler
+        val gateway = FakeGateway(snapshot = null, followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            failingDynamicPages = setOf(1), dynamicPageFailure = BiliLoginException("expired"))
+        val plugin = testPlugin(gateway,
+            config = testConfig(maxConsecutiveLoginFailures = 1).copy(cookiesJson = """[{"name":"SESSDATA","value":"stored"}]"""),
+            taskScheduler = scheduler)
+        seedPublisherAndSubscriber()
+        plugin.init()
+        try {
+            plugin.start()
+            scheduler.runNow("bilibili-detect")
+            val pausedCount = gateway.requestedPages.size
+            scheduler.runNow("bilibili-detect")
+            assertEquals(pausedCount, gateway.requestedPages.size)
+            scheduler.runNow("bilibili-maintenance")
+            scheduler.runNow("bilibili-detect")
+            assertTrue(gateway.requestedPages.size > pausedCount)
+            assertEquals(1, gateway.refreshedHomeCount)
+        } finally { plugin.stop() }
+    }
+
+    @Test
+    fun `admin timeout leaves one shared login check running and reuses result`() = runBlocking {
+        val entered = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val gateway = FakeGateway(snapshot = null, followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE), beforeLoginCheck = {
+                entered.complete(Unit)
+                finish.await()
+            })
+        val plugin = testPlugin(gateway, taskScheduler = testScheduler(autoRun = false))
+        plugin.init()
+        try {
+            val first = async { plugin.checkLoginState() }
+            entered.await()
+            assertEquals(PublisherLoginStatus.PENDING, withTimeout(4_800) { first.await() }.status)
+            assertEquals(1, gateway.loginCheckCount)
+            finish.complete(Unit)
+            assertEquals(PublisherLoginStatus.SUCCESS, plugin.checkLoginState().status)
+            assertEquals(1, gateway.loginCheckCount)
+        } finally { plugin.stop() }
+    }
+
+    @Test
+    fun `startup only waits briefly while login recovery continues and resumes polling`() = runBlocking {
+        val entered = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val gateway = FakeGateway(snapshot = null, followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE), beforeLoginCheck = {
+                entered.complete(Unit)
+                finish.await()
+            })
+        val scheduler = testScheduler(autoRun = false)
+        val plugin = testPlugin(gateway, taskScheduler = scheduler, loginCheckWaitMillis = 50)
+        plugin.init()
+        try {
+            withTimeout(1_000) { plugin.onStart() }
+            assertTrue(entered.isCompleted)
+            assertFalse(scheduler.isRunning("bilibili-detect"))
+            assertEquals(PublisherLoginStatus.PENDING, plugin.checkLoginState().status)
+            assertEquals(1, gateway.loginCheckCount)
+            finish.complete(Unit)
+            assertEquals(PublisherLoginStatus.SUCCESS, withTimeout(1_000) {
+                while (true) {
+                    val result = plugin.checkLoginState()
+                    if (result.status != PublisherLoginStatus.PENDING) return@withTimeout result
+                }
+                error("unreachable")
+            }.status)
+            assertTrue(scheduler.isRunning("bilibili-detect"))
+            assertEquals(1, gateway.loginCheckCount)
+        } finally { plugin.stop() }
+    }
+
+    @Test
+    fun `stopping plugin cancels pending startup recovery without starting polling`() = runBlocking {
+        val entered = CompletableDeferred<Unit>()
+        val canceled = CompletableDeferred<Unit>()
+        val gateway = FakeGateway(snapshot = null, followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE), beforeLoginCheck = {
+                entered.complete(Unit)
+                try { kotlinx.coroutines.awaitCancellation() } finally { canceled.complete(Unit) }
+            })
+        val scheduler = testScheduler(autoRun = false)
+        val plugin = testPlugin(gateway, taskScheduler = scheduler, loginCheckWaitMillis = 50)
+        plugin.init()
+        withTimeout(1_000) { plugin.onStart() }
+        entered.await()
+        withTimeout(1_000) { plugin.onStop() }
+        assertTrue(canceled.isCompleted)
+        assertFalse(scheduler.isRunning("bilibili-detect"))
+        assertEquals(1, gateway.closeCount)
+    }
+
+    @Test
+    fun `successful admin check starts detection after failed startup`() = runBlocking {
+        val gateway = defaultGateway().apply {
+            loginStateResult = PublisherLoginResult(PublisherLoginStatus.FAILED, "not logged in")
+        }
+        val scheduler = testScheduler(autoRun = false)
+        val plugin = testPlugin(gateway, taskScheduler = scheduler)
+        plugin.init()
+        try {
+            plugin.start()
+            assertFalse(scheduler.isRunning("bilibili-detect"))
+            gateway.loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "recovered")
+            assertEquals(PublisherLoginStatus.SUCCESS, plugin.checkLoginState().status)
+            assertTrue(scheduler.isRunning("bilibili-detect"))
+        } finally { plugin.stop() }
+    }
+
+    @Test
+    fun `successful admin check resumes login paused polling`() = runBlocking {
+        val scheduler = testScheduler(autoRun = false) as TestTaskScheduler
+        val gateway = FakeGateway(snapshot = null, followState = FollowState.FOLLOWING,
+            followActionResult = FollowActionResult(FollowActionStatus.DONE),
+            failingDynamicPages = setOf(1), dynamicPageFailure = BiliLoginException("expired"))
+        val plugin = testPlugin(gateway, config = testConfig(maxConsecutiveLoginFailures = 1), taskScheduler = scheduler)
+        seedPublisherAndSubscriber()
+        plugin.init()
+        try {
+            plugin.start()
+            scheduler.runNow("bilibili-detect")
+            val pausedCount = gateway.requestedPages.size
+            scheduler.runNow("bilibili-detect")
+            assertEquals(pausedCount, gateway.requestedPages.size)
+            assertEquals(PublisherLoginStatus.SUCCESS, plugin.checkLoginState().status)
+            scheduler.runNow("bilibili-detect")
+            assertTrue(gateway.requestedPages.size > pausedCount)
+        } finally { plugin.stop() }
     }
 
     @Test
@@ -2305,6 +2494,7 @@ class BilibiliPublisherPluginTest {
         cursorStore: BilibiliCursorStore = InMemoryCursorStore(),
         liveStatusStore: BilibiliLiveStatusStore = InMemoryLiveStatusStore(),
         startupBootstrapTimeoutMillis: Long = 30 * 60 * 1000L,
+        loginCheckWaitMillis: Long = 4_000,
     ): BilibiliPublisherPlugin {
         TestSubscriptions.reset()
         TestSourceStateStore.reset()
@@ -2316,6 +2506,7 @@ class BilibiliPublisherPluginTest {
             saveConfig = saveConfig,
             taskScheduler = taskScheduler,
             startupBootstrapTimeoutMillis = startupBootstrapTimeoutMillis,
+            loginCheckWaitMillis = loginCheckWaitMillis,
         )
     }
 
@@ -2440,7 +2631,7 @@ class BilibiliPublisherPluginTest {
         private val snapshot: BilibiliPublisherSnapshot?,
         private val followState: FollowState,
         private val followActionResult: FollowActionResult,
-        private val loginStateResult: PublisherLoginResult = PublisherLoginResult(
+        var loginStateResult: PublisherLoginResult = PublisherLoginResult(
             PublisherLoginStatus.SUCCESS,
             "login success",
         ),
@@ -2482,6 +2673,7 @@ class BilibiliPublisherPluginTest {
         private val liveBatchStarted: CompletableDeferred<Unit>? = null,
         private val liveBatchContinue: CompletableDeferred<Unit>? = null,
         private val beforeDynamicPage: suspend (Int) -> Unit = {},
+        private val beforeLoginCheck: suspend () -> Unit = {},
     ) : BilibiliPlatformGateway {
         private val groups: MutableList<BiliGroup> = initialGroups.toMutableList()
         private val dynamicPages: MutableMap<Int, BiliDynamicList> = initialDynamicPages.toMutableMap()
@@ -2676,7 +2868,13 @@ class BilibiliPublisherPluginTest {
             addGroupFailure?.let { throw it }
         }
 
-        override suspend fun checkLoginState(): PublisherLoginResult = loginStateResult
+        var loginCheckCount: Int = 0
+
+        override suspend fun checkLoginState(): PublisherLoginResult {
+            loginCheckCount += 1
+            beforeLoginCheck()
+            return loginStateResult
+        }
 
         override suspend fun loginByCookie(cookie: String): PublisherLoginResult = cookieLoginResult
 

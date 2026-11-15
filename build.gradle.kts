@@ -20,6 +20,8 @@ dependencies {
     val kotlinLoggingVersion = "8.0.4"
 
     implementation("top.colter.bilibili:bilibili-client:0.0.3")
+    implementation("io.ktor:ktor-client-okhttp:3.5.0")
+    implementation("io.ktor:ktor-client-encoding:3.5.0")
 
     compileOnly("top.colter.dynamic:dynamic-bot-core:$coreVersion")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
@@ -28,6 +30,7 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation("top.colter.dynamic:dynamic-bot-core:$coreVersion")
     testImplementation("io.github.oshai:kotlin-logging-jvm:$kotlinLoggingVersion")
+    testImplementation("io.ktor:ktor-client-mock:3.5.0")
 }
 
 tasks.test {

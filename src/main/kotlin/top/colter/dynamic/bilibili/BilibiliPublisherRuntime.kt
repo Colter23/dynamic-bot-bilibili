@@ -1,6 +1,10 @@
 package top.colter.dynamic.bilibili
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -118,6 +122,16 @@ internal class BilibiliPublisherRuntime() :
     private val detectMutex: Mutex = Mutex()
     private val publisherLock: Any = Any()
     private val startupBootstrapLock: Any = Any()
+    private val configLock = Any()
+    private val loginCheckMutex = Mutex()
+    private val loginApplyMutex = Mutex()
+    private lateinit var pluginScope: CoroutineScope
+    private var loginCheck: Deferred<PublisherLoginResult>? = null
+    private var runtimeStarted = false
+    private var loginCheckWaitMillis: Long = 4_000
+    private var savedCookiesJson = ""
+    private var savedSession = BilibiliStoredSession()
+    private var saveFailureReported = false
 
     private lateinit var config: BilibiliPublisherConfig
     private lateinit var pollService: BilibiliPlatformGateway
@@ -175,6 +189,7 @@ internal class BilibiliPublisherRuntime() :
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
         taskScheduler: TaskScheduler,
         startupBootstrapTimeoutMillis: Long = DETECT_BOOTSTRAP_TIMEOUT_MILLIS,
+        loginCheckWaitMillis: Long = 4_000,
     ) : this() {
         this.loadConfig = loadConfig
         this.useContextConfigService = false
@@ -186,6 +201,7 @@ internal class BilibiliPublisherRuntime() :
         this.useContextTaskScheduler = false
         this.useContextStateStores = false
         this.startupBootstrapTimeoutMillis = startupBootstrapTimeoutMillis
+        this.loginCheckWaitMillis = loginCheckWaitMillis
     }
 
     override val supportedLoginMethods: Set<PublisherLoginMethod> = setOf(
@@ -196,6 +212,7 @@ internal class BilibiliPublisherRuntime() :
 
     override suspend fun onLoad(context: PluginContext) {
         pluginId = context.pluginId
+        pluginScope = context.scope
         sourceUpdatePublisher = context.sourceUpdatePublisher
         notificationPublisher = context.notificationPublisher
         subscriptionQueryService = context.subscriptionQueryService
@@ -211,6 +228,8 @@ internal class BilibiliPublisherRuntime() :
             saveConfig = { id, next -> context.configService.save(id, next) }
         }
         config = loadConfig(pluginId)
+        savedCookiesJson = compactJson(config.cookiesJson)
+        savedSession = config.session
         rebuildPollService()
         mapper = BilibiliDynamicMapper { config.drawImageMode }
         requestFailureHandler = BilibiliRequestFailureHandler(
@@ -244,7 +263,7 @@ internal class BilibiliPublisherRuntime() :
         maintenanceTask = TaskDefinition(
             id = maintenanceTaskId,
             name = "Bilibili 账号维护",
-            description = "每天刷新 Bilibili Cookie，并检查已订阅 UP 主是否仍处于关注状态。",
+            description = "每天检查 Bilibili 登录凭据是否需要续期，并检查已订阅 UP 主的关注状态。",
             schedule = TaskSchedule.Cron(DAILY_MAINTENANCE_CRON, ZoneId.systemDefault()),
             action = {
                 runDailyMaintenance()
@@ -260,36 +279,18 @@ internal class BilibiliPublisherRuntime() :
 
     override suspend fun onStart() {
         ensurePollServiceReady()
-        val loginResult = pollService.checkLoginState()
-        if (loginResult.status == PublisherLoginStatus.SUCCESS) {
-            requestFailureHandler.recordSuccess("登录状态检查")
-            val taskStarted = bootstrapLoggedInState(allowReplay = true)
-            logger.info {
-                "Bilibili 轮询已就绪：账号=${loginResult.account?.name ?: loginResult.account?.userId ?: "未知"}，任务新启动=$taskStarted"
-            }
-        } else {
-            logger.warn {
-                "Bilibili 轮询未启动：登录状态=${loginResult.status}，原因=${loginResult.message}"
-            }
-            if (config.cookiesJson.isNotBlank()) {
-                publishNotification(
-                    SystemNotificationPublishRequest(
-                        type = "bilibili.start_login_failed",
-                        severity = SystemNotificationSeverity.WARN,
-                        title = "Bilibili 登录检查失败",
-                        content = "Bilibili 插件启动时检测到登录状态不可用，轮询未启动。请重新登录或更新 Cookie。",
-                        dedupeKey = "bilibili.start_login_failed:$pluginId",
-                        details = mapOf(
-                            "status" to loginResult.status.name,
-                            "message" to loginResult.message,
-                        ),
-                    ),
-                )
-            }
+        cancelLoginCheck()
+        loginApplyMutex.withLock { runtimeStarted = true }
+        if (config.cookiesJson.isNotBlank()) startMaintenanceTask()
+        val result = awaitLoginCheck(getOrStartLoginCheck(startup = true))
+        if (result.status == PublisherLoginStatus.PENDING) {
+            logger.info { "Bilibili 登录仍在检查或恢复，完成后自动启动轮询" }
         }
     }
 
     override suspend fun onStop() {
+        loginApplyMutex.withLock { runtimeStarted = false }
+        cancelLoginCheck()
         taskScheduler.stop(detectTaskId)
         taskScheduler.stop(maintenanceTaskId)
         closePollService("stop")
@@ -297,6 +298,8 @@ internal class BilibiliPublisherRuntime() :
     }
 
     override suspend fun onUnload() {
+        loginApplyMutex.withLock { runtimeStarted = false }
+        cancelLoginCheck()
         closePollService("unload")
     }
 
@@ -312,7 +315,11 @@ internal class BilibiliPublisherRuntime() :
             return ConfigApplyResult(changed = false, message = "Bilibili 配置未变化")
         }
 
-        config = next
+        synchronized(configLock) {
+            config = next
+            savedCookiesJson = compactJson(next.cookiesJson)
+            savedSession = next.session
+        }
         if (previous.followGroupName != next.followGroupName) {
             if (::followService.isInitialized) {
                 followService.resetFollowGroupCache()
@@ -417,7 +424,51 @@ internal class BilibiliPublisherRuntime() :
 
     override suspend fun checkLoginState(): PublisherLoginResult {
         ensurePollServiceReady()
-        return pollService.checkLoginState()
+        return awaitLoginCheck(getOrStartLoginCheck())
+    }
+
+    private suspend fun getOrStartLoginCheck(startup: Boolean = false): Deferred<PublisherLoginResult> =
+        loginCheckMutex.withLock {
+            loginCheck ?: pluginScope.async {
+                val result = pollService.checkLoginState()
+                persistSessionAndConfirm()
+                loginApplyMutex.withLock {
+                    if (runtimeStarted) {
+                        if (result.status == PublisherLoginStatus.SUCCESS) {
+                            requestFailureHandler.recordSuccess("登录状态检查", preserveRequestBlockCooldown = true)
+                            if (!taskScheduler.isRunning(detectTaskId)) bootstrapLoggedInState(allowReplay = startup)
+                            if (startup) logger.info { "Bilibili 登录校验完成，轮询已就绪" }
+                        } else if (startup && config.cookiesJson.isNotBlank()) {
+                            logger.warn { "Bilibili 轮询未启动：原因=${result.message}" }
+                            publishNotification(SystemNotificationPublishRequest(
+                                type = "bilibili.start_login_failed",
+                                severity = SystemNotificationSeverity.WARN,
+                                title = "Bilibili 登录检查失败",
+                                content = "Bilibili 登录检查暂未通过，轮询未启动。维护任务会继续尝试恢复，也可重新登录或更新 Cookie。",
+                                dedupeKey = "bilibili.start_login_failed:$pluginId",
+                                details = mapOf("status" to result.status.name, "message" to result.message),
+                            ))
+                        }
+                    }
+                }
+                result.withRenewalWarning(pollService.exportSession())
+            }.also { loginCheck = it }
+        }
+
+    private suspend fun awaitLoginCheck(pending: Deferred<PublisherLoginResult>): PublisherLoginResult {
+        return try {
+            withTimeoutOrNull(loginCheckWaitMillis) { pending.await() }?.also {
+                loginCheckMutex.withLock { if (loginCheck === pending) loginCheck = null }
+            } ?: PublisherLoginResult(PublisherLoginStatus.PENDING, "正在检查或恢复 Bilibili 登录，请稍后刷新")
+        } catch (e: Exception) {
+            if (pending.isCompleted) loginCheckMutex.withLock { if (loginCheck === pending) loginCheck = null }
+            throw e
+        }
+    }
+
+    private suspend fun cancelLoginCheck() {
+        val pending = loginCheckMutex.withLock { loginCheck.also { loginCheck = null } }
+        pending?.cancelAndJoin()
     }
 
     override suspend fun exportCookie(): String? {
@@ -450,7 +501,7 @@ internal class BilibiliPublisherRuntime() :
 
     override suspend fun resolveLink(parsedLink: ParsedLink): LinkResolution {
         ensurePollServiceReady()
-        return linkResolver.resolveLink(parsedLink)
+        return try { linkResolver.resolveLink(parsedLink) } finally { persistSessionAndConfirm() }
     }
 
     override suspend fun downloadVideoLink(request: LinkVideoDownloadRequest): LinkVideoDownloadResult {
@@ -468,7 +519,7 @@ internal class BilibiliPublisherRuntime() :
         ensurePollServiceReady()
         val dynamics = runBilibiliRequest("手动查询最新动态 uid=$userId") {
             pollService.fetchUserNewDynamic(userId)
-        }.getOrElse { error ->
+        }.also { persistSessionAndConfirm() }.getOrElse { error ->
             return PublisherLatestUpdateResult.Failed(error.message ?: "请求 Bilibili 动态接口失败")
         }
         val latest = dynamics.items.firstOrNull { dynamic ->
@@ -500,13 +551,14 @@ internal class BilibiliPublisherRuntime() :
 
     override suspend fun loginByCookie(cookie: String): PublisherLoginResult {
         ensurePollServiceReady()
+        cancelLoginCheck()
         val result = pollService.loginByCookie(cookie)
-        persistCookiesIfLoggedIn(result)
+        val saved = result.status != PublisherLoginStatus.SUCCESS || persistSessionAndConfirm()
         if (result.status == PublisherLoginStatus.SUCCESS) {
             requestFailureHandler.recordSuccess("Cookie 登录")
             bootstrapLoggedInState(allowReplay = !taskScheduler.isRunning(detectTaskId))
         }
-        return result
+        return if (saved) result else result.copy(message = "登录成功，但凭据暂未保存，将自动重试；请勿立即重启")
     }
 
     override suspend fun loginByQrCode(
@@ -514,13 +566,14 @@ internal class BilibiliPublisherRuntime() :
         onStatusChanged: suspend (PublisherLoginResult) -> Unit,
     ): PublisherLoginResult {
         ensurePollServiceReady()
+        cancelLoginCheck()
         val result = pollService.loginByQrCode(onQrCode, onStatusChanged)
-        persistCookiesIfLoggedIn(result)
+        val saved = result.status != PublisherLoginStatus.SUCCESS || persistSessionAndConfirm()
         if (result.status == PublisherLoginStatus.SUCCESS) {
             requestFailureHandler.recordSuccess("二维码登录")
             bootstrapLoggedInState(allowReplay = !taskScheduler.isRunning(detectTaskId))
         }
-        return result
+        return if (saved) result else result.copy(message = "登录成功，但凭据暂未保存，将自动重试；请勿立即重启")
     }
 
     private suspend fun detectAndPublish(skipLiveDetection: Boolean = false) {
@@ -554,7 +607,7 @@ internal class BilibiliPublisherRuntime() :
                     skipLiveForCurrentRun = false
                     detectAndPublishLocked(skipLiveForRun, startupLiveWarmupAttempted)
                 } while (pendingDetection)
-                persistRuntimeCookiesIfChanged()
+                persistSessionAndConfirm()
                 true
             }
             if (completed == null) {
@@ -832,15 +885,22 @@ internal class BilibiliPublisherRuntime() :
     }
 
     private suspend fun runDailyMaintenance() {
-        if (::requestFailureHandler.isInitialized && requestFailureHandler.isPollingPaused()) {
-            logger.debug { "Bilibili 账号维护跳过：轮询请求已暂停" }
-            return
-        }
         ensurePollServiceReady()
-        runBilibiliRequest("每日刷新 Bilibili 首页 Cookie") {
+        if (config.cookiesJson.isBlank()) return
+        if (requestFailureHandler.isRequestBlockCooldownActive()) return
+        val wasPaused = requestFailureHandler.isPollingPaused()
+        runBilibiliRequest("每日检查 Bilibili 登录凭据续期") {
             pollService.refreshCookieSession()
         }.onFailure {
-            logger.warn { "Bilibili 每日 Cookie 刷新失败：${it.message ?: "未知错误"}" }
+            logger.warn { "Bilibili 登录凭据续期未完成：${it.message ?: "请求失败"}" }
+        }
+        persistSessionAndConfirm()
+        if (wasPaused || !taskScheduler.isRunning(detectTaskId)) {
+            val login = pollService.checkLoginState()
+            persistSessionAndConfirm()
+            if (login.status != PublisherLoginStatus.SUCCESS) return
+            requestFailureHandler.recordSuccess("账号维护登录校验")
+            if (!taskScheduler.isRunning(detectTaskId)) bootstrapLoggedInState(allowReplay = false)
         }
         if (requestFailureHandler.isPollingPaused()) {
             persistRuntimeCookiesIfChanged()
@@ -1361,51 +1421,55 @@ internal class BilibiliPublisherRuntime() :
 
     private fun closePollService(reason: String) {
         if (!::pollService.isInitialized || pollServiceClosed) return
-        runCatching { persistRuntimeCookiesIfChanged() }
-            .onFailure {
-                logger.warn(it) { "关闭 Bilibili 客户端前回存 Cookie 失败：reason=$reason" }
-            }
         runCatching { pollService.close() }
             .onFailure {
                 logger.warn(it) { "关闭 Bilibili 客户端失败：reason=$reason" }
+            }
+        runCatching { persistRuntimeCookiesIfChanged() }
+            .onFailure {
+                logger.warn(it) { "关闭 Bilibili 客户端后回存 Cookie 失败：reason=$reason" }
             }
         pollServiceClosed = true
         logger.debug { "Bilibili 客户端已关闭：reason=$reason" }
     }
 
+    private suspend fun persistSessionAndConfirm(): Boolean = pollService.persistSession(::persistSnapshot)
+
     private suspend fun importStoredCookies() {
         if (config.cookiesJson.isBlank()) return
         runCatching {
             pollService.importCookiesJson(config.cookiesJson)
+            pollService.importSession(config.session)
         }.onFailure {
             logger.warn(it) { "导入 Bilibili 登录信息失败" }
         }
     }
 
-    private fun persistCookiesIfLoggedIn(result: PublisherLoginResult) {
-        if (result.status != PublisherLoginStatus.SUCCESS) return
-        config = config.copy(cookiesJson = compactJson(pollService.exportCookiesJson()))
-        runCatching {
-            saveConfig(pluginId, config)
-        }.onFailure {
-            logger.warn(it) { "保存 Bilibili 登录信息失败" }
-        }
-    }
-
     // BiliClient 在轮询期间可能刷新内存 Cookie（wbi/bili_ticket/风控轮换）。
     // 若不回存，重启后会用过期 Cookie 重新登录。仅在导出值发生变化时写回，避免无谓落盘。
-    private fun persistRuntimeCookiesIfChanged() {
-        if (!::pollService.isInitialized) return
-        val latest = compactJson(pollService.exportCookiesJson())
-        if (latest.isBlank() || latest == "[]") return
-        if (latest == compactJson(config.cookiesJson)) return
-        config = config.copy(cookiesJson = latest)
-        runCatching {
+    private fun persistRuntimeCookiesIfChanged(): Boolean {
+        if (!::pollService.isInitialized) return true
+        return persistSnapshot(pollService.exportSessionSnapshot())
+    }
+
+    private fun persistSnapshot(snapshot: BilibiliSessionSnapshot): Boolean = synchronized(configLock) {
+        val latest = compactJson(snapshot.cookiesJson)
+        if (latest.isBlank() || latest == "[]") return@synchronized true
+        val latestSession = snapshot.state
+        config = config.copy(cookiesJson = latest, session = latestSession)
+        if (latest == savedCookiesJson && latestSession == savedSession) return@synchronized true
+        try {
             saveConfig(pluginId, config)
-        }.onFailure {
-            logger.warn(it) { "回存 Bilibili 运行期 Cookie 失败" }
+            savedCookiesJson = latest
+            savedSession = latestSession
+            saveFailureReported = false
+            logger.debug { "Bilibili 登录会话已保存" }
+            true
+        } catch (_: Exception) {
+            if (!saveFailureReported) logger.warn { "保存 Bilibili 登录会话失败，将在后续检查、轮询或停止时重试" }
+            saveFailureReported = true
+            false
         }
-        logger.debug { "Bilibili 运行期 Cookie 已回存配置" }
     }
 
     private fun compactJson(json: String): String {

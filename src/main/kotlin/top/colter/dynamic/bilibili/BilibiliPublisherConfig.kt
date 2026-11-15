@@ -18,6 +18,7 @@ public data class BilibiliPublisherConfig(
     val requestBlockCooldownMinutes: Int = 30,
     val cookiesJson: String = "",
     val drawImageMode: BilibiliDrawImageMode = BilibiliDrawImageMode.ORIGINAL,
+    val session: BilibiliStoredSession = BilibiliStoredSession(),
 )
 
 public object BilibiliPublisherConfigForm {

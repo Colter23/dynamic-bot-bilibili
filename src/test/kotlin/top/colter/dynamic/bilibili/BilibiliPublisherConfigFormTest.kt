@@ -12,6 +12,7 @@ class BilibiliPublisherConfigFormTest {
         val pollingField = BilibiliPublisherConfigForm.spec.fields.single { it.path == "pollingIntervalSeconds" }
 
         assertFalse(BilibiliPublisherConfigForm.spec.fields.any { it.path == "cookiesJson" })
+        assertFalse(BilibiliPublisherConfigForm.spec.fields.any { it.path.startsWith("session") })
         assertTrue(pollingField.restartRequired)
         assertEquals(1L, pollingField.min)
         assertTrue(pollingField.description.contains("秒"))

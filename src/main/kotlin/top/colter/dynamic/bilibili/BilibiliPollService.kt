@@ -4,9 +4,15 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import io.ktor.client.request.parameter
+import java.util.concurrent.atomic.AtomicLong
 import top.colter.bilibili.api.downloadVideo
 import top.colter.bilibili.api.follow
-import top.colter.bilibili.api.getCurrentUserNav
 import top.colter.bilibili.api.getDynamicDetail
 import top.colter.bilibili.api.getLiveInfo
 import top.colter.bilibili.api.getLiveStatusBatch
@@ -19,9 +25,10 @@ import top.colter.bilibili.api.getVideoDetail
 import top.colter.bilibili.api.modifyGroupUsers
 import top.colter.bilibili.api.probeVideoDownloadSize
 import top.colter.bilibili.api.createGroup
-import top.colter.bilibili.auth.qrCode
-import top.colter.bilibili.client.BiliAuthClient
+import top.colter.bilibili.api.LOGIN_QRCODE
+import top.colter.bilibili.api.LOGIN_VERIFY
 import top.colter.bilibili.client.BiliClient
+import top.colter.bilibili.client.getData
 import top.colter.bilibili.data.EditCookie
 import top.colter.bilibili.data.dynamic.BiliDynamic
 import top.colter.bilibili.data.dynamic.BiliDynamicList
@@ -46,6 +53,7 @@ import top.colter.dynamic.core.plugin.PublisherLoginAccount
 import top.colter.dynamic.core.plugin.PublisherLoginResult
 import top.colter.dynamic.core.plugin.PublisherLoginStatus
 import top.colter.dynamic.core.plugin.PublisherQrLoginChallenge
+import top.colter.dynamic.core.tools.loggerFor
 import top.colter.dynamic.core.data.LiveStatus
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
@@ -251,6 +259,16 @@ internal interface BilibiliPlatformGateway {
 
     fun exportCookiesJson(): String = ""
 
+    fun importSession(state: BilibiliStoredSession) {}
+
+    fun exportSession(): BilibiliStoredSession = BilibiliStoredSession()
+
+    fun exportSessionSnapshot(): BilibiliSessionSnapshot = BilibiliSessionSnapshot(exportCookiesJson(), exportSession())
+
+    suspend fun confirmSessionSaved(state: BilibiliStoredSession) {}
+
+    suspend fun persistSession(save: (BilibiliSessionSnapshot) -> Boolean): Boolean = save(exportSessionSnapshot())
+
     suspend fun loginByCookie(cookie: String): PublisherLoginResult {
         return PublisherLoginResult(
             status = PublisherLoginStatus.UNSUPPORTED,
@@ -288,19 +306,43 @@ internal interface BilibiliQrLoginGateway {
 }
 
 internal class BilibiliClientQrLoginGateway(
-    private val client: BiliAuthClient = BiliAuthClient(),
-    private val pollIntervalMs: Long = 1000,
+    private val client: BiliClient = BilibiliSessionClient(),
+    private val pollIntervalMs: Long = 2000,
     private val timeoutMs: Long = 180_000,
+    private val requestTimeoutMs: Long = 15_000,
 ) : BilibiliQrLoginGateway {
     override suspend fun loginByQrCode(
         onQrCode: suspend (QrCodeLoginData) -> Unit,
         onStatusChanged: suspend (QrCodeLoginResult) -> Unit,
     ): BilibiliQrLoginOutcome {
-        val result = client.qrCode(pollIntervalMs, timeoutMs, onQrCode, onStatusChanged)
-        return BilibiliQrLoginOutcome(
-            result = result,
-            cookiesJson = client.exportEditCookiesJson(),
-        )
+        return withTimeout(timeoutMs) {
+            val qrCode = read { client.getData<QrCodeLoginData>(LOGIN_QRCODE) }
+            onQrCode(qrCode)
+            while (true) {
+                val result = read {
+                    client.getData<QrCodeLoginResult>(LOGIN_VERIFY) { parameter("qrcode_key", qrCode.qrcodeKey) }
+                }
+                onStatusChanged(result)
+                when (result.status) {
+                    QrCodeLoginStatus.SUCCESS, QrCodeLoginStatus.EXPIRED ->
+                        return@withTimeout BilibiliQrLoginOutcome(result, exportBilibiliCookies(client))
+                    QrCodeLoginStatus.UNKNOWN -> throw BilibiliSessionException("无法识别的扫码状态（code=${result.code}）")
+                    else -> delay(pollIntervalMs)
+                }
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("unreachable")
+        }
+    }
+
+    private suspend fun <T> read(block: suspend () -> T): T {
+        repeat(3) { attempt ->
+            try { return withTimeout(requestTimeoutMs) { block() } }
+            catch (e: CancellationException) { currentCoroutineContext().ensureActive(); if (attempt == 2) throw e }
+            catch (e: java.io.IOException) { if (attempt == 2) throw BilibiliSessionException("扫码登录网络请求失败，请稍后重试") }
+            delay(1_000L * (attempt + 1))
+        }
+        error("unreachable")
     }
 
     override fun close() {
@@ -310,25 +352,48 @@ internal class BilibiliClientQrLoginGateway(
 
 internal class BilibiliPollService(
     private val requestIntervalMs: Long,
-    private val client: BiliClient = BiliClient(),
-    private val currentUserNavProvider: suspend () -> BiliUserInfo = { client.getCurrentUserNav() },
+    client: BiliClient = BilibiliSessionClient(boundedRequests = false),
+    private val currentUserNavProvider: (suspend () -> BiliUserInfo)? = null,
     private val qrLoginGatewayFactory: () -> BilibiliQrLoginGateway = { BilibiliClientQrLoginGateway() },
+    private val sessionClientFactory: () -> BiliClient = { BilibiliSessionClient(boundedRequests = false) },
+    private val sessionProtocol: BilibiliSessionProtocol = BilibiliSessionProtocol(),
+    private val clockMillis: () -> Long = System::currentTimeMillis,
+    private val loginTimeoutMillis: Long = 210_000,
+    private val validationTimeoutMillis: Long = 15_000,
 ) : BilibiliPlatformGateway {
+    private val sessionLogger = loggerFor<BilibiliPollService>()
+    private val clientLock = Any()
+    private var client: BiliClient = client
+    private val users = mutableMapOf<BiliClient, Int>()
+    private val retired = mutableSetOf<BiliClient>()
+    private var closed = false
+    private val generation = AtomicLong()
+    private var credentialUpdateVersion: Long? = null
+    private val refreshMutex = Mutex()
+    private val persistenceMutex = Mutex()
+    private var lastRefreshAttemptAt = Long.MIN_VALUE
+    @Volatile private var session = BilibiliStoredSession()
+
     override fun close() {
-        client.close()
+        synchronized(clientLock) {
+            if (closed) return
+            generation.incrementAndGet()
+            closed = true
+            retire(client)
+        }
     }
 
     override suspend fun fetchNewDynamicPage(page: Int, type: String): BiliDynamicList {
-        return callWithRequestDelay { client.getNewDynamic(page, type) }
+        return callWithRequestDelay { client -> client.getNewDynamic(page, type) }
     }
 
     override suspend fun fetchUserNewDynamic(userId: Long): BiliDynamicList {
-        return callWithRequestDelay { client.getUserNewDynamic(userId) }
+        return callWithRequestDelay { client -> client.getUserNewDynamic(userId) }
     }
 
     override suspend fun fetchDynamicDetail(dynamicId: String): BiliDynamic? {
         val id = dynamicId.toLongOrNull() ?: return null
-        return callWithRequestDelay { client.getDynamicDetail(id) }
+        return callWithRequestDelay { client -> client.getDynamicDetail(id) }
     }
 
     override suspend fun expandShortUrl(url: String, timeoutMs: Long): String? {
@@ -342,7 +407,7 @@ internal class BilibiliPollService(
 
     override suspend fun fetchPublisherSnapshot(userId: String): BilibiliPublisherSnapshot? {
         val uid = userId.toLongOrNull() ?: return null
-        val info = callWithRequestDelay { client.getUserInfo(uid) }
+        val info = callWithRequestDelay { client -> client.getUserInfo(uid) }
         return info.toPublisherSnapshot()
     }
 
@@ -353,7 +418,7 @@ internal class BilibiliPollService(
             .distinct()
             .mapNotNull { userId -> userId.toLongOrNull()?.let { userId to it } }
         if (uidByText.isEmpty()) return emptyMap()
-        val snapshots = callWithRequestDelay { client.getUserInfoBatch(uidByText.map { it.second }) }
+        val snapshots = callWithRequestDelay { client -> client.getUserInfoBatch(uidByText.map { it.second }) }
             .associateBy { it.mid }
         return uidByText.mapNotNull { (userId, uid) ->
             snapshots[uid]?.toPublisherSnapshot()?.let { userId to it }
@@ -368,7 +433,7 @@ internal class BilibiliPollService(
         }
 
         val boundedLimit = limit.coerceAtLeast(1)
-        val response = callWithRequestDelay {
+        val response = callWithRequestDelay { client ->
             client.searchUser(
                 keyword = keyword,
                 page = 1,
@@ -397,7 +462,7 @@ internal class BilibiliPollService(
         if (normalized.isBlank()) return null
         val aid = normalized.removePrefix("av").removePrefix("AV").toLongOrNull()
         val bvid = normalized.takeIf { it.startsWith("BV", ignoreCase = true) }
-        val video = callWithRequestDelay { client.getVideoDetail(aid = aid, bvid = bvid) }
+        val video = callWithRequestDelay { client -> client.getVideoDetail(aid = aid, bvid = bvid) }
         return video.toSnapshot()
     }
 
@@ -429,7 +494,7 @@ internal class BilibiliPollService(
         }
 
         cleanupVideoCacheFiles(directory, fileName)
-        return try {
+        return withClient { client -> try {
             val detail = client.getVideoDetail(aid = aid, bvid = bvid)
             val quality = request.quality.toBiliClientQuality()
             val probedSize = client.probeVideoDownloadSize(
@@ -475,7 +540,7 @@ internal class BilibiliPollService(
             throw e.toUserFacingDownloadError()
         } finally {
             applyRequestDelay()
-        }
+        } }
     }
 
     /**
@@ -493,7 +558,7 @@ internal class BilibiliPollService(
 
     override suspend fun fetchLiveRoomSnapshot(roomId: String): BilibiliLiveRoomSnapshot? {
         val id = roomId.toLongOrNull() ?: return null
-        val info = callWithRequestDelay { client.getLiveInfo(id) }
+        val info = callWithRequestDelay { client -> client.getLiveInfo(id) }
         return BilibiliLiveRoomSnapshot(
             userId = info.uid.takeIf { it > 0 }?.toString().orEmpty(),
             roomId = info.roomId.takeIf { it > 0 }?.toString() ?: roomId,
@@ -520,7 +585,7 @@ internal class BilibiliPollService(
     override suspend fun fetchLiveStatusBatch(uids: Iterable<Long>): List<BilibiliLiveSnapshot> {
         val uidList = uids.toList()
         if (uidList.isEmpty()) return emptyList()
-        val data = callWithRequestDelay { client.getLiveStatusBatch(uidList) }
+        val data = callWithRequestDelay { client -> client.getLiveStatusBatch(uidList) }
         return data.map { (uid, live) ->
             BilibiliLiveSnapshot(
                 userId = live.uid.takeIf { it > 0 }?.toString() ?: uid.toString(),
@@ -552,7 +617,7 @@ internal class BilibiliPollService(
 
     override suspend fun fetchFollowRelation(userId: String): BilibiliFollowRelationSnapshot? {
         val uid = userId.toLongOrNull() ?: return null
-        val relation = callWithRequestDelay { client.relation(uid) }
+        val relation = callWithRequestDelay { client -> client.relation(uid) }
         return BilibiliFollowRelationSnapshot(
             userId = relation.mid.takeIf { it > 0 }?.toString() ?: uid.toString(),
             following = relation.attribute.isFollowingRelation(),
@@ -570,7 +635,7 @@ internal class BilibiliPollService(
             .toList()
         if (uidByText.isEmpty()) return emptyMap()
 
-        val relations = callWithRequestDelay { client.relations(uidByText.map { it.second }) }
+        val relations = callWithRequestDelay { client -> client.relations(uidByText.map { it.second }) }
         return uidByText.mapNotNull { (text, uid) ->
             val relation = relations[uid] ?: return@mapNotNull null
             text to BilibiliFollowRelationSnapshot(
@@ -587,7 +652,7 @@ internal class BilibiliPollService(
                 FollowActionStatus.FAILED,
                 "无效的 Bilibili 用户 ID：$userId",
             )
-        callWithRequestDelay { client.follow(uid) }
+        callWithRequestDelay(retryAfterLogin = false) { client -> client.follow(uid) }
         return FollowActionResult(FollowActionStatus.DONE)
     }
 
@@ -601,7 +666,7 @@ internal class BilibiliPollService(
             .toList()
         if (mids.isEmpty()) return FollowActionResult(FollowActionStatus.NOOP)
 
-        callWithRequestDelay { client.modifyFollowBatch(mids, FollowAction.FOLLOW) }
+        callWithRequestDelay(retryAfterLogin = false) { client -> client.modifyFollowBatch(mids, FollowAction.FOLLOW) }
         return FollowActionResult(FollowActionStatus.DONE)
     }
 
@@ -611,7 +676,7 @@ internal class BilibiliPollService(
                 FollowActionStatus.FAILED,
                 "无效的 Bilibili 用户 ID：$userId",
             )
-        callWithRequestDelay { client.unfollow(uid) }
+        callWithRequestDelay(retryAfterLogin = false) { client -> client.unfollow(uid) }
         return FollowActionResult(
             FollowActionStatus.DONE,
             "已取消关注 Bilibili 用户：$userId",
@@ -619,56 +684,135 @@ internal class BilibiliPollService(
     }
 
     override suspend fun fetchFollowGroups(): List<BiliGroup> {
-        return callWithRequestDelay { client.getGroupList() }
+        return callWithRequestDelay { client -> client.getGroupList() }
     }
 
     override suspend fun createFollowGroup(tag: String) {
-        callWithRequestDelay { client.createGroup(tag) }
+        callWithRequestDelay(retryAfterLogin = false) { client -> client.createGroup(tag) }
     }
 
     override suspend fun addUsersToFollowGroup(fids: Iterable<Long>, tagIds: Iterable<Long>) {
-        callWithRequestDelay { client.modifyGroupUsers(fids, tagIds) }
+        callWithRequestDelay(retryAfterLogin = false) { client -> client.modifyGroupUsers(fids, tagIds) }
     }
 
     override suspend fun refreshCookieSession() {
-        callWithRequestDelay { client.getString(BILIBILI_HOME) }
+        refreshSession(force = false)
     }
 
     override suspend fun checkLoginState(): PublisherLoginResult {
-        return try {
-            val nav = currentUserNavProvider()
-            PublisherLoginResult(
-                status = PublisherLoginStatus.SUCCESS,
-                message = "登录成功",
-                account = PublisherLoginAccount(
-                    userId = nav.mid.takeIf { it > 0 }?.toString(),
-                    name = nav.name.takeIf { it.isNotBlank() },
-                    avatar = nav.face.url.takeIf { it.isNotBlank() }?.let { MediaRef(it, MediaKind.AVATAR) },
-                ),
-            )
+        if (currentUserNavProvider == null && exportCookiesJson() == "[]" && session.refreshToken.isBlank()) {
+            return PublisherLoginResult(PublisherLoginStatus.FAILED, "Bilibili 未登录")
+        }
+        val result = try {
+            var previousClient: BiliClient? = null
+            try {
+                withTimeout(validationTimeoutMillis) { withClient { previousClient = it; validate(it) } }
+            } catch (e: BiliLoginException) {
+                recoverSession()
+                if (synchronized(clientLock) { client === previousClient }) throw e
+                withTimeout(validationTimeoutMillis) { withClient { validate(it) } }
+            }
         } catch (e: CancellationException) {
-            throw e
+            currentCoroutineContext().ensureActive()
+            PublisherLoginResult(PublisherLoginStatus.FAILED, "Bilibili 登录状态检查超时，请稍后重试")
         } catch (e: BiliLoginException) {
             PublisherLoginResult(
                 status = PublisherLoginStatus.FAILED,
                 message = "Bilibili 未登录",
             )
-        } catch (e: Throwable) {
+        } catch (e: Exception) {
             PublisherLoginResult(
                 status = PublisherLoginStatus.FAILED,
-                message = e.message ?: "登录状态检查失败",
+                message = safeLoginFailure(e),
             )
         } finally {
             applyRequestDelay()
         }
+        return result.withRenewalWarning(exportSession())
     }
 
     override suspend fun importCookiesJson(cookiesJson: String) {
-        client.importEditCookiesJson(cookiesJson, true)
+        val version = beginCredentialUpdate()
+        val candidate = sessionClientFactory()
+        try {
+            importBilibiliCookies(candidate, cookiesJson)
+            if (!install(candidate, version, BilibiliStoredSession())) candidate.close()
+        } catch (e: Exception) {
+            candidate.close()
+            throw e
+        } finally {
+            endCredentialUpdate(version)
+        }
     }
 
     override fun exportCookiesJson(): String {
-        return client.exportEditCookiesJson()
+        return synchronized(clientLock) { exportBilibiliCookies(client) }
+    }
+
+    override fun importSession(state: BilibiliStoredSession) {
+        synchronized(clientLock) {
+            session = state.takeIf { it.credentialDigest == bilibiliCredentialDigest(exportBilibiliCookies(client)) }
+                ?: BilibiliStoredSession()
+            lastRefreshAttemptAt = Long.MIN_VALUE
+        }
+    }
+
+    override fun exportSession(): BilibiliStoredSession = synchronized(clientLock) {
+        session.copy(credentialDigest = bilibiliCredentialDigest(exportBilibiliCookies(client)))
+    }
+
+    override fun exportSessionSnapshot(): BilibiliSessionSnapshot = synchronized(clientLock) {
+        val cookies = exportBilibiliCookies(client)
+        BilibiliSessionSnapshot(cookies, session.copy(credentialDigest = bilibiliCredentialDigest(cookies)))
+    }
+
+    override suspend fun confirmSessionSaved(state: BilibiliStoredSession) {
+        refreshMutex.withLock {
+            val (version, current, cookies) = synchronized(clientLock) {
+                Triple(generation.get(), session, exportBilibiliCookies(client))
+            }
+            if (current.pendingConfirmationToken.isBlank() || current.nextAttemptAtMillis > clockMillis() ||
+                current != state.copy(credentialDigest = current.credentialDigest) ||
+                state.credentialDigest != bilibiliCredentialDigest(cookies)) return@withLock
+            val next = try {
+                withClient(version) { sessionProtocol.confirm(it, current.pendingConfirmationToken) }
+                current.copy(pendingConfirmationToken = "", failureCount = 0, nextAttemptAtMillis = 0)
+            } catch (_: BilibiliLoginReplacedException) {
+                return@withLock
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                val failures = (current.failureCount + 1).coerceAtMost(4)
+                val requiresLogin = e is BiliLoginException ||
+                    (e is BilibiliSessionException && e.requiresLogin) || failures >= 4
+                val reason = if (requiresLogin) "旧凭据确认失败，自动续期已停止，请重新扫码登录" else ""
+                current.copy(
+                    pendingConfirmationToken = if (requiresLogin) "" else current.pendingConfirmationToken,
+                    failureCount = failures,
+                    nextAttemptAtMillis = if (requiresLogin) 0 else clockMillis() +
+                        listOf(5 * 60_000L, 30 * 60_000L, 6 * 60 * 60_000L)[failures - 1],
+                    requiresLogin = requiresLogin,
+                    renewalFailureReason = reason,
+                )
+            }
+            synchronized(clientLock) {
+                if (generation.get() == version && session == current) {
+                    session = next
+                    if (next.requiresLogin) {
+                        sessionLogger.warn { "Bilibili ${next.renewalFailureReason}；当前会话可用时仍会继续使用" }
+                    } else if (next.failureCount == 1) {
+                        sessionLogger.warn { "Bilibili 新凭据已保存，旧凭据确认暂未完成，将退避重试" }
+                    }
+                }
+            }
+        }
+    }
+
+    override suspend fun persistSession(save: (BilibiliSessionSnapshot) -> Boolean): Boolean = persistenceMutex.withLock {
+        val snapshot = exportSessionSnapshot()
+        if (!save(snapshot)) return@withLock false
+        if (snapshot.state.pendingConfirmationToken.isBlank()) return@withLock true
+        confirmSessionSaved(snapshot.state)
+        save(exportSessionSnapshot())
     }
 
     override suspend fun loginByCookie(cookie: String): PublisherLoginResult {
@@ -677,15 +821,15 @@ internal class BilibiliPollService(
             return PublisherLoginResult(PublisherLoginStatus.FAILED, "Cookie 不能为空")
         }
 
-        return importAndVerifyCookies {
+        return importAndVerifyCookies { candidate ->
             if (trimmed.startsWith("[")) {
-                client.importEditCookiesJson(trimmed, true)
+                importBilibiliCookies(candidate, trimmed)
             } else {
                 val cookies = parseCookieHeader(trimmed)
                 if (cookies.isEmpty()) {
                     throw IllegalArgumentException("未找到有效的 Cookie 键值对")
                 }
-                client.importEditCookies(cookies, true)
+                candidate.importEditCookies(cookies.map { it.copy(domain = it.domain.removePrefix(".").lowercase()) }, true)
             }
         }
     }
@@ -694,25 +838,37 @@ internal class BilibiliPollService(
         onQrCode: suspend (PublisherQrLoginChallenge) -> Unit,
         onStatusChanged: suspend (PublisherLoginResult) -> Unit,
     ): PublisherLoginResult {
+        val version = beginCredentialUpdate()
         val gateway = qrLoginGatewayFactory()
         return try {
-            val outcome = gateway.loginByQrCode(
-                onQrCode = { qrCodeData -> onQrCode(qrCodeData.toChallenge()) },
-                onStatusChanged = { qrCodeResult -> onStatusChanged(qrCodeResult.toPublisherLoginResult()) },
-            )
-            if (outcome.result.status == QrCodeLoginStatus.SUCCESS) {
-                importAndVerifyCookies {
-                    client.importEditCookiesJson(outcome.cookiesJson, true)
+            withTimeout(loginTimeoutMillis) {
+                val outcome = gateway.loginByQrCode(
+                    onQrCode = { qrCodeData -> onQrCode(qrCodeData.toChallenge()) },
+                    onStatusChanged = { qrCodeResult ->
+                        if (generation.get() != version) throw BilibiliLoginReplacedException()
+                        onStatusChanged(if (qrCodeResult.status == QrCodeLoginStatus.SUCCESS) {
+                            PublisherLoginResult(PublisherLoginStatus.PENDING, "扫码已确认，正在验证登录")
+                        } else qrCodeResult.toPublisherLoginResult())
+                    },
+                )
+                if (outcome.result.status == QrCodeLoginStatus.SUCCESS) {
+                    importAndVerifyCookies(version, outcome.result.refreshToken) { candidate ->
+                        importBilibiliCookies(candidate, outcome.cookiesJson)
+                    }
+                } else {
+                    outcome.result.toPublisherLoginResult()
                 }
-            } else {
-                outcome.result.toPublisherLoginResult()
             }
         } catch (e: CancellationException) {
-            throw e
-        } catch (e: Throwable) {
-            e.toQrFailureResult()
+            currentCoroutineContext().ensureActive()
+            return PublisherLoginResult(PublisherLoginStatus.EXPIRED, "二维码登录或账号校验超时，请重试")
+        } catch (_: BilibiliLoginReplacedException) {
+            PublisherLoginResult(PublisherLoginStatus.CANCELED, "登录操作已被更新的凭据替换")
+        } catch (e: Exception) {
+            PublisherLoginResult(PublisherLoginStatus.FAILED, safeLoginFailure(e))
         } finally {
             runCatching { gateway.close() }
+            endCredentialUpdate(version)
         }
     }
 
@@ -722,12 +878,138 @@ internal class BilibiliPollService(
         }
     }
 
-    private suspend fun <T> callWithRequestDelay(block: suspend () -> T): T {
+    private suspend fun <T> callWithRequestDelay(retryAfterLogin: Boolean = true, block: suspend (BiliClient) -> T): T {
+        var previousClient: BiliClient? = null
         return try {
-            block()
+            try { withClient { previousClient = it; block(it) } }
+            catch (e: BiliLoginException) {
+                if (!retryAfterLogin) throw e
+                recoverSession()
+                if (synchronized(clientLock) { client === previousClient }) throw e
+                withClient(block = block)
+            }
         } finally {
             applyRequestDelay()
         }
+    }
+
+    private suspend fun <T> withClient(expectedVersion: Long? = null, block: suspend (BiliClient) -> T): T {
+        val acquired = synchronized(clientLock) {
+            check(!closed) { "Bilibili 客户端已关闭" }
+            if (expectedVersion != null && generation.get() != expectedVersion) throw BilibiliLoginReplacedException()
+            client.also { users[it] = (users[it] ?: 0) + 1 }
+        }
+        return try { block(acquired) } finally {
+            synchronized(clientLock) {
+                val remaining = users.getValue(acquired) - 1
+                if (remaining == 0) {
+                    users.remove(acquired)
+                    if (retired.remove(acquired)) acquired.close()
+                } else users[acquired] = remaining
+            }
+        }
+    }
+
+    private fun retire(previous: BiliClient) {
+        if ((users[previous] ?: 0) == 0) previous.close() else retired.add(previous)
+    }
+
+    private fun beginCredentialUpdate(): Long = synchronized(clientLock) {
+        check(!closed) { "Bilibili 客户端已关闭" }
+        generation.incrementAndGet().also { credentialUpdateVersion = it }
+    }
+
+    private fun endCredentialUpdate(version: Long) = synchronized(clientLock) {
+        if (credentialUpdateVersion == version) credentialUpdateVersion = null
+    }
+
+    private suspend fun recoverSession() {
+        try {
+            refreshSession(force = true)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            sessionLogger.warn { "Bilibili 登录恢复未完成：${safeLoginFailure(e)}" }
+        }
+    }
+
+    private fun install(candidate: BiliClient, version: Long, state: BilibiliStoredSession): Boolean = synchronized(clientLock) {
+        if (closed || !generation.compareAndSet(version, version + 1)) return@synchronized false
+        val previous = client
+        client = candidate
+        session = state
+        lastRefreshAttemptAt = Long.MIN_VALUE
+        retire(previous)
+        true
+    }
+
+    private suspend fun validate(candidate: BiliClient): PublisherLoginResult {
+        val testProvider = currentUserNavProvider ?: return sessionProtocol.validate(candidate)
+        val nav = testProvider()
+        if (nav.mid <= 0) throw BiliLoginException("Bilibili 未登录")
+        return PublisherLoginResult(PublisherLoginStatus.SUCCESS, "登录成功", PublisherLoginAccount(
+            userId = nav.mid.toString(), name = nav.name,
+            avatar = nav.face.url.takeIf { it.isNotBlank() }?.let { MediaRef(it, MediaKind.AVATAR) },
+        ))
+    }
+
+    private suspend fun refreshSession(force: Boolean) = refreshMutex.withLock {
+        val now = clockMillis()
+        val (version, previous, cookies) = synchronized(clientLock) {
+            val current = session
+            if (closed || credentialUpdateVersion != null || current.refreshToken.isBlank() || current.requiresLogin || current.pendingConfirmationToken.isNotBlank() ||
+                (lastRefreshAttemptAt != Long.MIN_VALUE && now - lastRefreshAttemptAt < 5 * 60_000L) ||
+                current.nextAttemptAtMillis > now || (!force && now - current.lastCheckAtMillis < 24 * 60 * 60_000L)) return@withLock
+            lastRefreshAttemptAt = now
+            Triple(generation.get(), current, exportBilibiliCookies(client))
+        }
+        val candidate = sessionClientFactory()
+        var installed = false
+        try {
+            withTimeout(60_000) {
+                importBilibiliCookies(candidate, cookies)
+                val info = sessionProtocol.refreshInfo(candidate)
+                if (!info.refresh) {
+                    synchronized(clientLock) {
+                        if (generation.get() == version) session = previous.copy(lastCheckAtMillis = now, failureCount = 0, nextAttemptAtMillis = 0)
+                    }
+                    return@withTimeout
+                }
+                val token = sessionProtocol.refresh(candidate, previous.refreshToken, info.timestamp)
+                importBilibiliCookies(candidate, exportBilibiliCookies(candidate))
+                val verified = validate(candidate)
+                if (verified.account?.userId != previous.accountId || previous.accountId.isBlank()) {
+                    throw BilibiliSessionException("Bilibili 续期账号不一致，请重新扫码登录", requiresLogin = true)
+                }
+                installed = install(candidate, version, BilibiliStoredSession(
+                    accountId = previous.accountId, refreshToken = token,
+                    pendingConfirmationToken = previous.refreshToken, lastCheckAtMillis = now,
+                ))
+            }
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            synchronized(clientLock) {
+                if (generation.get() == version) {
+                    val failures = (previous.failureCount + 1).coerceAtMost(3)
+                    session = previous.copy(
+                        failureCount = failures,
+                        nextAttemptAtMillis = now + listOf(5 * 60_000L, 30 * 60_000L, 6 * 60 * 60_000L)[failures - 1],
+                        requiresLogin = e is BilibiliSessionException && e.requiresLogin,
+                        renewalFailureReason = if (e is BilibiliSessionException && e.requiresLogin) e.reason else "",
+                    )
+                }
+            }
+            throw BilibiliSessionException(safeLoginFailure(e))
+        } finally {
+            if (!installed) candidate.close()
+        }
+    }
+
+    private fun safeLoginFailure(error: Exception): String = when (error) {
+        is BilibiliSessionException -> error.reason
+        is BiliLoginException -> "Bilibili 未登录"
+        is CancellationException -> "Bilibili 登录请求超时，请稍后重试"
+        else -> "Bilibili 登录请求失败（${error.javaClass.simpleName}），请稍后重试"
     }
 
     private fun BiliVideo.toSnapshot(): BilibiliVideoSnapshot {
@@ -797,36 +1079,40 @@ internal class BilibiliPollService(
             .orEmpty()
     }
 
-    private suspend fun importAndVerifyCookies(importer: suspend () -> Unit): PublisherLoginResult {
-        val previousCookiesJson = client.exportEditCookiesJson()
+    private suspend fun importAndVerifyCookies(
+        version: Long = beginCredentialUpdate(),
+        refreshToken: String = "",
+        importer: suspend (BiliClient) -> Unit,
+    ): PublisherLoginResult {
+        val candidate = sessionClientFactory()
+        var installed = false
         return try {
-            importer()
-            val result = checkLoginState()
-            if (result.status != PublisherLoginStatus.SUCCESS) {
-                restoreCookies(previousCookiesJson)
+            withTimeout(validationTimeoutMillis) {
+                importer(candidate)
+                val result = validate(candidate)
+                currentCoroutineContext().ensureActive()
+                installed = install(candidate, version, BilibiliStoredSession(
+                    accountId = result.account?.userId.orEmpty(), refreshToken = refreshToken,
+                    lastCheckAtMillis = clockMillis(),
+                ))
+                if (!installed) PublisherLoginResult(PublisherLoginStatus.CANCELED, "登录操作已被更新的凭据替换")
+                else result.copy(message = if (refreshToken.isBlank()) "登录成功；未提供长期令牌，自动续期不可用" else "登录成功")
             }
-            result
         } catch (e: CancellationException) {
-            restoreCookies(previousCookiesJson)
-            throw e
-        } catch (e: Throwable) {
-            restoreCookies(previousCookiesJson)
+            currentCoroutineContext().ensureActive()
+            PublisherLoginResult(PublisherLoginStatus.FAILED, "Bilibili 账号校验超时，请稍后重试")
+        } catch (e: Exception) {
             PublisherLoginResult(
                 status = PublisherLoginStatus.FAILED,
-                message = e.message ?: "登录失败",
+                message = safeLoginFailure(e),
             )
+        } finally {
+            if (!installed) candidate.close()
+            endCredentialUpdate(version)
         }
     }
 
-    private suspend fun restoreCookies(cookiesJson: String) {
-        runCatching {
-            if (cookiesJson.isBlank()) {
-                client.importEditCookies(emptyList<EditCookie>(), true)
-            } else {
-                client.importEditCookiesJson(cookiesJson, true)
-            }
-        }
-    }
+    private class BilibiliLoginReplacedException : IllegalStateException()
 
     private fun QrCodeLoginData.toChallenge(): PublisherQrLoginChallenge {
         return PublisherQrLoginChallenge(
@@ -863,16 +1149,6 @@ internal class BilibiliPollService(
                 message = resolvedMessage.ifBlank { "Bilibili 二维码登录失败：code=$code" },
             )
         }
-    }
-
-    private fun Throwable.toQrFailureResult(): PublisherLoginResult {
-        val reason = message ?: "二维码登录失败"
-        val status = if (reason.contains("失效") || reason.contains("超时") || reason.contains("expired", ignoreCase = true)) {
-            PublisherLoginStatus.EXPIRED
-        } else {
-            PublisherLoginStatus.FAILED
-        }
-        return PublisherLoginResult(status, reason)
     }
 
     private fun parseCookieHeader(cookieHeader: String): List<EditCookie> {
@@ -928,7 +1204,6 @@ internal class BilibiliPollService(
     private companion object {
         private const val DEFAULT_COOKIE_DOMAIN: String = ".bilibili.com"
         private const val DEFAULT_COOKIE_PATH: String = "/"
-        private const val BILIBILI_HOME: String = "https://www.bilibili.com"
         private const val QR_EXPIRES_SECONDS: Long = 180
         private const val MAX_SHORT_URL_REDIRECTS: Int = 5
         private const val FOLLOWING_ATTRIBUTE: Int = 2

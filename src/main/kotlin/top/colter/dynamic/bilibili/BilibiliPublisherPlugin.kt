@@ -52,6 +52,7 @@ public class BilibiliPublisherPlugin private constructor(
         saveConfig: (String, BilibiliPublisherConfig) -> Unit = { _, _ -> },
         taskScheduler: TaskScheduler,
         startupBootstrapTimeoutMillis: Long = 30 * 60 * 1000L,
+        loginCheckWaitMillis: Long = 4_000,
     ) : this(
         BilibiliPublisherRuntime(
             loadConfig = loadConfig,
@@ -61,6 +62,7 @@ public class BilibiliPublisherPlugin private constructor(
             saveConfig = saveConfig,
             taskScheduler = taskScheduler,
             startupBootstrapTimeoutMillis = startupBootstrapTimeoutMillis,
+            loginCheckWaitMillis = loginCheckWaitMillis,
         )
     )
 

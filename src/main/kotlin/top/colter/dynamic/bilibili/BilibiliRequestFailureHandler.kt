@@ -48,9 +48,13 @@ internal class BilibiliRequestFailureHandler(
      * 只有必须使用已登录会话的接口才能清除未登录失败计数。
      * 直播状态等公共接口会在 Cookie 失效后继续成功响应。
      */
-    suspend fun recordSuccess(operation: String, confirmsLogin: Boolean = true) {
+    suspend fun recordSuccess(
+        operation: String,
+        confirmsLogin: Boolean = true,
+        preserveRequestBlockCooldown: Boolean = false,
+    ) {
         val wasPausedByLogin = pollingPausedByLoginFailure
-        val wasPausedByRequestBlock = requestBlockPausedUntilMillis != null
+        val wasPausedByRequestBlock = !preserveRequestBlockCooldown && requestBlockPausedUntilMillis != null
         if ((confirmsLogin && (consecutiveLoginFailures > 0 || wasPausedByLogin)) || wasPausedByRequestBlock) {
             requestFailureLogger.info {
                 "Bilibili 请求已恢复：operation=$operation，之前连续未登录失败=$consecutiveLoginFailures，之前风控冷却=${wasPausedByRequestBlock}"
@@ -60,7 +64,7 @@ internal class BilibiliRequestFailureHandler(
             consecutiveLoginFailures = 0
             pollingPausedByLoginFailure = false
         }
-        requestBlockPausedUntilMillis = null
+        if (!preserveRequestBlockCooldown) requestBlockPausedUntilMillis = null
         if (wasPausedByLogin && confirmsLogin) {
             publishNotification(
                 SystemNotificationPublishRequest(
@@ -246,7 +250,7 @@ internal class BilibiliRequestFailureHandler(
         }
     }
 
-    private fun isRequestBlockCooldownActive(): Boolean {
+    fun isRequestBlockCooldownActive(): Boolean {
         val pausedUntil = requestBlockPausedUntilMillis ?: return false
         return clockMillis() < pausedUntil
     }

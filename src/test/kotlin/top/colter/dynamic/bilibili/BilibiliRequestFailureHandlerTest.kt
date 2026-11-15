@@ -15,6 +15,22 @@ import kotlin.test.assertTrue
 
 class BilibiliRequestFailureHandlerTest {
     @Test
+    fun `background login recovery clears login pause while preserving risk cooldown`() = runBlocking {
+        var now = 1_000L
+        val handler = BilibiliRequestFailureHandler(
+            configProvider = { BilibiliPublisherConfig(maxConsecutiveLoginFailures = 1, requestBlockCooldownMinutes = 30) },
+            clockMillis = { now },
+        )
+        handler.recordFailure("动态轮询", BiliLoginException("expired"))
+        handler.recordFailure("直播状态", BiliBanException("blocked"))
+        handler.recordSuccess("后台登录检查", preserveRequestBlockCooldown = true)
+        assertTrue(handler.isRequestBlockCooldownActive())
+        assertTrue(handler.isPollingPaused())
+        now += 30 * 60_000L
+        assertFalse(handler.isPollingPaused())
+    }
+
+    @Test
     fun `missing csrf should notify once without pausing polling`() = runBlocking {
         val requests = mutableListOf<SystemNotificationPublishRequest>()
         val handler = BilibiliRequestFailureHandler(
