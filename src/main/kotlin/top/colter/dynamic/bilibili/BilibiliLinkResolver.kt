@@ -16,6 +16,9 @@ import top.colter.dynamic.core.link.LinkResolution
 import top.colter.dynamic.core.link.ParsedLink
 import java.net.URI
 import kotlin.math.roundToLong
+import top.colter.dynamic.core.link.LinkVideoResource
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 internal class BilibiliLinkResolver(
     private val platformId: PlatformId,
@@ -132,6 +135,12 @@ internal class BilibiliLinkResolver(
                 durationSeconds = snapshot.durationSeconds,
                 publishedAtEpochSeconds = snapshot.publishedAtEpochSeconds,
             ),
+            video = LinkVideoResource(platformId, parsedLink.targetId, snapshot.durationSeconds, buildJsonObject {
+                put("aid", snapshot.aid)
+                put("bvid", snapshot.bvid)
+                snapshot.cid?.let { put("cid", it) }
+                put("title", snapshot.title)
+            }),
         )
     }
 

@@ -662,6 +662,7 @@ class BilibiliPublisherPluginTest {
                     favorite = 8,
                     coin = 9,
                     share = 10,
+                    cid = 279786,
                 ),
             ),
         )
@@ -680,6 +681,12 @@ class BilibiliPublisherPluginTest {
         assertEquals("https://example.com/owner-face.png", resolution.preview.publisher?.avatar?.uri)
         assertNull(resolution.preview.publisher?.banner)
         assertEquals(120, resolution.preview.durationSeconds)
+        val resource = requireNotNull(resolution.video)
+        assertEquals(parsed.platformId, resource.platformId)
+        assertEquals(parsed.targetId, resource.id)
+        assertEquals("279786", resource.downloadParameters["cid"].toString())
+        assertEquals("170001", resource.downloadParameters["aid"].toString())
+        assertEquals(120, resource.durationSeconds)
         assertEquals(listOf("play", "danmaku", "like", "coin", "favorite", "comment", "share"), resolution.preview.metrics.map { it.key })
         assertEquals(listOf("BV1xx411c7mD"), gateway.requestedVideos)
         assertEquals(emptyList(), gateway.requestedPublisherSnapshots)

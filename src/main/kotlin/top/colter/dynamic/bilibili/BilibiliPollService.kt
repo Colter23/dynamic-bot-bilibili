@@ -22,6 +22,10 @@ import top.colter.bilibili.api.getGroupList
 import top.colter.bilibili.api.getUserInfo
 import top.colter.bilibili.api.getUserInfoBatch
 import top.colter.bilibili.api.getVideoDetail
+import top.colter.bilibili.api.getVideoPlayUrl
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.longOrNull
 import top.colter.bilibili.api.modifyGroupUsers
 import top.colter.bilibili.api.probeVideoDownloadSize
 import top.colter.bilibili.api.createGroup
@@ -99,6 +103,7 @@ internal data class BilibiliVideoSnapshot(
     val favorite: Long? = null,
     val coin: Long? = null,
     val share: Long? = null,
+    val cid: Long? = null,
 )
 
 internal data class BilibiliLiveSnapshot(
@@ -495,15 +500,22 @@ internal class BilibiliPollService(
 
         cleanupVideoCacheFiles(directory, fileName)
         return withClient { client -> try {
-            val detail = client.getVideoDetail(aid = aid, bvid = bvid)
+            val resolved = request.resource?.takeIf { it.platformId == request.parsedLink.platformId && it.id == normalized }
+            val parameters = resolved?.downloadParameters
+            val resolvedCid = parameters?.get("cid")?.jsonPrimitive?.longOrNull?.takeIf { it > 0 }
+            val detail = if (resolvedCid == null) client.getVideoDetail(aid = aid, bvid = bvid) else null
+            val videoAid = detail?.aid ?: parameters?.get("aid")?.jsonPrimitive?.longOrNull ?: aid
+            val videoBvid = detail?.bvid ?: parameters?.get("bvid")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: bvid
+            val videoCid = detail?.cid ?: resolvedCid!!
             val quality = request.quality.toBiliClientQuality()
-            val probedSize = client.probeVideoDownloadSize(
-                aid = detail.aid,
-                bvid = detail.bvid,
-                cid = detail.cid,
+            val playUrl = client.getVideoPlayUrl(
+                aid = videoAid,
+                bvid = videoBvid,
+                cid = videoCid,
                 quality = quality,
             )
             if (request.maxBytes > 0) {
+                val probedSize = client.probeVideoDownloadSize(playUrl = playUrl, aid = videoAid, bvid = videoBvid, quality = quality)
                 val totalBytes = probedSize.totalBytes
                     ?: throw BiliDownloadException("无法探测视频下载大小")
                 if (totalBytes > request.maxBytes) {
@@ -514,11 +526,11 @@ internal class BilibiliPollService(
                 }
             }
             val result = client.downloadVideo(
-                playUrl = probedSize.playUrl,
+                playUrl = playUrl,
                 directory = directory,
                 fileName = fileName,
-                aid = detail.aid,
-                bvid = detail.bvid,
+                aid = videoAid,
+                bvid = videoBvid,
                 ffmpegPath = request.ffmpegPath.trim().takeIf { it.isNotBlank() },
                 overwrite = true,
                 keepStreams = false,
@@ -529,8 +541,8 @@ internal class BilibiliPollService(
             LinkVideoDownloadResult(
                 video = MediaRef(finalFile.absolutePath, MediaKind.VIDEO, mimeType = "video/mp4"),
                 fileSizeBytes = finalSize,
-                title = detail.title,
-                durationSeconds = detail.duration.takeIf { it > 0 }?.toLong(),
+                title = detail?.title ?: parameters?.get("title")?.jsonPrimitive?.contentOrNull.orEmpty(),
+                durationSeconds = detail?.duration?.takeIf { it > 0 }?.toLong() ?: resolved?.durationSeconds,
             )
         } catch (e: CancellationException) {
             cleanupVideoCacheFiles(directory, fileName)
@@ -1014,6 +1026,7 @@ internal class BilibiliPollService(
 
     private fun BiliVideo.toSnapshot(): BilibiliVideoSnapshot {
         return BilibiliVideoSnapshot(
+            cid = cid,
             aid = aid,
             bvid = bvid,
             title = title,
