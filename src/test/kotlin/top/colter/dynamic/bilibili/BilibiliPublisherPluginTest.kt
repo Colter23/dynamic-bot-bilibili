@@ -1853,6 +1853,64 @@ class BilibiliPublisherPluginTest {
     }
 
     @Test
+    fun `login recovery after failed startup publishes missed dynamics before regular polling`() = runBlocking {
+        for (recoverViaMaintenance in listOf(true, false)) {
+            val now = System.currentTimeMillis() / 1000
+            val scheduler = testScheduler(autoRun = false) as TestTaskScheduler
+            val cursorStore = InMemoryCursorStore()
+            val sourceUpdates = RecordingSourceUpdatePublisher()
+            val gateway = defaultGateway().apply {
+                loginStateResult = PublisherLoginResult(PublisherLoginStatus.FAILED, "not logged in")
+            }
+            val plugin = testPlugin(
+                gateway,
+                config = testConfig(replayWindowMinutes = 120, liveDetectionEnabled = false)
+                    .copy(cookiesJson = """[{"name":"SESSDATA","value":"stored"}]"""),
+                taskScheduler = scheduler,
+                cursorStore = cursorStore,
+            )
+            val publisher = seedPublisherAndSubscriber().publisher
+            val cursor = SourceCursor(
+                publisherId = publisher.id,
+                sourceKey = BILIBILI_DYNAMIC_FEED_KEY,
+                eventType = SourceEventType.DYNAMIC_CREATED,
+                lastSeenUpdateKey = dynamicIdFor(now - 1_200L, 1),
+                lastSeenAtEpochSeconds = now - 1_200L,
+                recentUpdateKeys = emptyList(),
+            )
+            cursorStore.put(publisher.id, cursor)
+            val newest = buildDynamic(now - 300L, publisher.externalId.toLong(), "demo-up", 2)
+            val older = buildDynamic(now - 600L, publisher.externalId.toLong(), "demo-up", 3)
+            gateway.setDynamicPages(mapOf(1 to dynamicPage(true, newest), 2 to dynamicPage(false, older)))
+            plugin.init(sourceUpdates)
+            try {
+                plugin.start()
+                assertFalse(scheduler.isRunning("bilibili-detect"))
+                assertEquals(cursor, cursorStore.get(publisher.id))
+                gateway.loginStateResult = PublisherLoginResult(PublisherLoginStatus.SUCCESS, "recovered")
+                if (recoverViaMaintenance) {
+                    scheduler.runNow("bilibili-maintenance")
+                } else {
+                    assertEquals(PublisherLoginStatus.SUCCESS, plugin.checkLoginState().status)
+                }
+
+                scheduler.runNow("bilibili-detect")
+                scheduler.runNow("bilibili-detect")
+
+                val expectedIds = listOf(older.id.toString(), newest.id.toString())
+                val publishedIds = withTimeout(3_000) {
+                    List(expectedIds.size) { sourceUpdates.receive().update.key.externalId }
+                }
+                assertEquals(expectedIds, publishedIds)
+                assertEquals(expectedIds, cursorStore.markedDynamicIds(publisher.id))
+                assertNull(withTimeoutOrNull(100) { sourceUpdates.receive() })
+            } finally {
+                plugin.stop()
+            }
+        }
+    }
+
+    @Test
     fun `maintenance resumes polling paused by expired credentials`() = runBlocking {
         val scheduler = testScheduler(autoRun = false) as TestTaskScheduler
         val gateway = FakeGateway(snapshot = null, followState = FollowState.FOLLOWING,

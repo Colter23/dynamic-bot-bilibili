@@ -280,7 +280,12 @@ internal class BilibiliPublisherRuntime() :
     override suspend fun onStart() {
         ensurePollServiceReady()
         cancelLoginCheck()
-        loginApplyMutex.withLock { runtimeStarted = true }
+        loginApplyMutex.withLock {
+            synchronized(startupBootstrapLock) {
+                startupReplayPending = config.replayWindowMinutes > 0
+            }
+            runtimeStarted = true
+        }
         if (config.cookiesJson.isNotBlank()) startMaintenanceTask()
         val result = awaitLoginCheck(getOrStartLoginCheck(startup = true))
         if (result.status == PublisherLoginStatus.PENDING) {
@@ -436,7 +441,7 @@ internal class BilibiliPublisherRuntime() :
                     if (runtimeStarted) {
                         if (result.status == PublisherLoginStatus.SUCCESS) {
                             requestFailureHandler.recordSuccess("登录状态检查", preserveRequestBlockCooldown = true)
-                            if (!taskScheduler.isRunning(detectTaskId)) bootstrapLoggedInState(allowReplay = startup)
+                            if (!taskScheduler.isRunning(detectTaskId)) bootstrapLoggedInState(allowReplay = false)
                             if (startup) logger.info { "Bilibili 登录校验完成，轮询已就绪" }
                         } else if (startup && config.cookiesJson.isNotBlank()) {
                             logger.warn { "Bilibili 轮询未启动：原因=${result.message}" }
@@ -813,8 +818,8 @@ internal class BilibiliPublisherRuntime() :
     private fun scheduleStartupBootstrap(allowReplay: Boolean) {
         synchronized(startupBootstrapLock) {
             startupFollowGroupPending = true
-            if (config.replayWindowMinutes > 0 && allowReplay) {
-                startupReplayPending = true
+            startupReplayPending = config.replayWindowMinutes > 0 && (startupReplayPending || allowReplay)
+            if (startupReplayPending) {
                 startupCursorWarmupPending = false
             } else if (!taskScheduler.isRunning(detectTaskId)) {
                 startupCursorWarmupPending = true
@@ -899,8 +904,11 @@ internal class BilibiliPublisherRuntime() :
             val login = pollService.checkLoginState()
             persistSessionAndConfirm()
             if (login.status != PublisherLoginStatus.SUCCESS) return
-            requestFailureHandler.recordSuccess("账号维护登录校验")
-            if (!taskScheduler.isRunning(detectTaskId)) bootstrapLoggedInState(allowReplay = false)
+            loginApplyMutex.withLock {
+                if (!runtimeStarted) return
+                requestFailureHandler.recordSuccess("账号维护登录校验")
+                if (!taskScheduler.isRunning(detectTaskId)) bootstrapLoggedInState(allowReplay = false)
+            }
         }
         if (requestFailureHandler.isPollingPaused()) {
             persistRuntimeCookiesIfChanged()
